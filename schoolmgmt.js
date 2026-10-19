@@ -127,6 +127,12 @@ module.exports = function mountSchoolManagement(app, ctx) {
     res.status(500).json({ error: 'Something went wrong while talking to School Management.' });
   });
   const lagosToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' });
+  // Which channel will really deliver? A message set to WhatsApp while WhatsApp is not live (but SMS is) would show as
+  // "sent" and never reach the parent, so those go by SMS instead. (Once WhatsApp is live nothing is changed.)
+  const waLive = () => ch.status().whatsapp === 'live', smsLive = () => ch.status().sms === 'live';
+  const defaultChannel = () => (waLive() ? 'whatsapp' : 'sms');
+  const channelFor = (c) => (c.channel === 'whatsapp' && !waLive() && smsLive() ? 'sms' : c.channel);
+  const dryRun = () => !waLive() && !smsLive();   // nothing would really be delivered
 
   /* ---------- connect / disconnect ---------- */
   app.get('/api/sm', requireAuth, (req, res) => {
@@ -200,7 +206,7 @@ module.exports = function mountSchoolManagement(app, ctx) {
         const cls = (p.class && p.class.name) || '';
         const hit = bySm.get(p.id) || (p.admission_no && byAdm.get(norm(p.admission_no))) || byPhoneName.get(phone + '|' + norm(name));
         if (hit) { upd.run(name, cls, p.admission_no || '', g.name || '', phone, p.id, hit.id); updated++; }
-        else { ins.run(sid, name, cls, p.admission_no || '', g.name || '', phone, 'whatsapp', p.id); added++; }
+        else { ins.run(sid, name, cls, p.admission_no || '', g.name || '', phone, defaultChannel(), p.id); added++; }
       }
     })();
     const gone = mine.filter((c) => c.sm_student_id && !seen.has(c.sm_student_id) && !pupils.some((p) => p.id === c.sm_student_id)).length;
@@ -267,7 +273,7 @@ module.exports = function mountSchoolManagement(app, ctx) {
       families++; totalOwed += row.owed_total;
       for (const c of live) targets.push({ c, row });
     }
-    const summary = { term: `${term.name} ${term.year}`, families, messages: targets.length, total_owed: totalOwed, no_contact: noContact.slice(0, 30), no_contact_count: noContact.length, opted_out: optedOut, ai: !!process.env.ANTHROPIC_API_KEY };
+    const summary = { term: `${term.name} ${term.year}`, families, messages: targets.length, total_owed: totalOwed, no_contact: noContact.slice(0, 30), no_contact_count: noContact.length, opted_out: optedOut, ai: !!process.env.ANTHROPIC_API_KEY, dry_run: dryRun() };
     if (b.preview) return res.json(summary);
     if (!targets.length) throw new SmError(balances.length ? 'None of the families who owe fees could be messaged. Import the parents from School Management first, or check the class you chose.' : 'Nobody owes fees at the moment. Nothing to remind.', 409);
     if (targets.length > 200) throw new SmError(`That is ${targets.length} messages. Draft up to 200 at a time: choose a class.`, 400);
@@ -275,7 +281,7 @@ module.exports = function mountSchoolManagement(app, ctx) {
     const tone = ai.TONES[b.tone] ? b.tone : school.default_tone;
     const language = ai.LANGUAGES.includes(b.language) ? b.language : school.default_language;
     const rowOf = new Map(targets.map((t) => [t.c.id, t.row]));
-    const contacts = targets.map((t) => t.c);
+    const contacts = targets.map((t) => ({ ...t.c, channel: channelFor(t.c) }));   // the channel that will really deliver
     let drafts = {};
     if (b.use_ai !== false && process.env.ANTHROPIC_API_KEY) {
       const notes = Object.fromEntries(targets.map((t) => [t.c.id, feeNote(t.row, term)]));
@@ -319,7 +325,7 @@ module.exports = function mountSchoolManagement(app, ctx) {
       if (!kind) continue;
       const cs = find(m).filter((c) => !c.opted_out);
       if (!cs.length) { noContact.push(m.admission_no); continue; }
-      groups[kind].push(...cs);
+      groups[kind].push(...cs.map((c) => ({ ...c, channel: channelFor(c) })));
     }
     const ids = [];
     let already = 0;
@@ -336,7 +342,7 @@ module.exports = function mountSchoolManagement(app, ctx) {
       }
     }
     const sent = school.auto_send_absence && ids.length ? queueAndSend(sid, ids) : null;
-    res.json({ date: day, absent: groups.absence.length, late: groups.late.length, drafted: ids.length, already_notified: already, no_contact: noContact.length, auto_sent: !!sent });
+    res.json({ date: day, absent: groups.absence.length, late: groups.late.length, drafted: ids.length, already_notified: already, no_contact: noContact.length, auto_sent: !!sent, dry_run: dryRun() });
   }));
 
   /* ---------- 4. delivered messages noted on the pupil's page ---------- */

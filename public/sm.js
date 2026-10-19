@@ -93,12 +93,14 @@
         var t = r.families + ' famil' + (r.families === 1 ? 'y owes' : 'ies owe') + ' ' + naira(r.total_owed) + ' in total (' + r.term + '). ' + r.messages + ' message' + (r.messages === 1 ? '' : 's') + ' would be drafted.';
         if (r.no_contact_count) t += ' ' + r.no_contact_count + ' owing pupils have no parent in your list (' + r.no_contact.slice(0, 4).map(function (x) { return x.pupil; }).join(', ') + (r.no_contact_count > 4 ? '\u2026' : '') + '). Use \u201cImport parents\u201d on the Parents page.';
         if (r.opted_out) t += ' ' + r.opted_out + ' opted out of messages.';
+        if (r.dry_run) t += ' Careful: SMS and WhatsApp are both in test mode (dry-run) on this server, so nothing would really be delivered. See Settings.';
         msg(m, t);
       }).catch(function (e) { msg(m, e.message, true); });
     });
     $('smfees').addEventListener('click', function () {
       var b = $('smfees'), m = $('smfeemsg'); b.disabled = true; msg(m, 'Drafting\u2026');
       call('POST', '/sm/fee-drafts', feeBody(false)).then(function (r) {
+        if (r.dry_run) alert('These reminders are drafted, but SMS and WhatsApp are both in test mode (dry-run) on this server. Clicking Send would NOT reach any parent. Add the SMS or WhatsApp keys first (see Settings).');
         PCB.toast(r.count + ' reminder' + (r.count === 1 ? '' : 's') + ' drafted' + (r.templates ? ' (' + r.templates + ' from the standard wording)' : '') + '. Review before sending.'); PCB.showDrafts();
       }).catch(function (e) { b.disabled = false; msg(m, e.message, true); });
     });
@@ -106,6 +108,7 @@
       var b = $('smabs'), m = $('smabsmsg'); b.disabled = true; msg(m, 'Reading the register\u2026');
       call('POST', '/sm/absence-drafts', { date: $('smday').value }).then(function (r) {
         if (!r.drafted) { b.disabled = false; msg(m, r.absent + r.late === 0 ? 'Nobody was marked absent or late on ' + r.date + '.' : 'Nothing new to draft. ' + (r.already_notified ? r.already_notified + ' parents were already alerted that day. ' : '') + (r.no_contact ? r.no_contact + ' pupils have no parent in your list.' : '')); return; }
+        if (r.dry_run) alert('These alerts are drafted, but SMS and WhatsApp are both in test mode (dry-run) on this server. Clicking Send would NOT reach any parent. Add the SMS or WhatsApp keys first (see Settings).');
         PCB.toast(r.drafted + ' alert' + (r.drafted === 1 ? '' : 's') + (r.auto_sent ? ' sent' : ' drafted. Review before sending')); PCB.showDrafts();
       }).catch(function (e) { b.disabled = false; msg(m, e.message, true); });
     });
