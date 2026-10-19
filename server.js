@@ -399,6 +399,14 @@ app.post('/webhooks/whatsapp', (req, res) => {
   res.sendStatus(200);
 });
 
+/* SM-CONNECTION: link to SmartClass School Management (all of it lives in schoolmgmt.js).
+   If it ever fails to start, the Parent Bot carries on exactly as before and only logs the reason. */
+try {
+  require('./schoolmgmt')(app, { db, requireAuth, requireAdmin, hash, sign, setCookie, ai, ch, queueAndSend, wrap });
+} catch (e) {
+  console.error('School Management connection could not start:', e.message);
+}
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;
