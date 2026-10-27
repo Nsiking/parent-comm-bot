@@ -4,6 +4,7 @@ const fs = require('fs');
 
 const dir = process.env.DATA_DIR || path.join(__dirname, 'data');
 fs.mkdirSync(dir, { recursive: true });
+require('./backup').applyPendingRestore(path.join(dir, 'parentbot.db')); /* BK-BACKUP: a backup staged with restore-backup.js is put in place before the database opens */
 const db = new Database(path.join(dir, 'parentbot.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');

@@ -7,3 +7,9 @@ data
 *.smsecret
 sm-backup-*/
 apply-sm-connection.js
+*.restored
+*.restore-pending
+*.before-restore-*
+*.backup-status.json
+bk-backup-*/
+apply-backup.js
