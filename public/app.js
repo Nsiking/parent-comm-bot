@@ -22,6 +22,11 @@
   }
   const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message, true); } };
 
+  // ---------- password field with show/hide eye
+  const EYE = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const EYE_OFF = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+  const pwField = (label, autocomplete) => `<label>${label}<span class="pw"><input name="password" type="password" minlength="8" autocomplete="${autocomplete}" required><button type="button" class="pw-toggle" data-a="togglepw" aria-label="Show password" aria-pressed="false">${EYE}</button></span></label>`;
+
   // ---------- auth
   function renderAuth(mode = 'login') {
     clearInterval(S.poll);
@@ -31,7 +36,7 @@
       <form id="authForm">
         ${mode === 'register' ? `<label>School name<input name="schoolName" required></label><label>Your name<input name="name" required></label>` : ''}
         <label>Email<input name="email" type="email" autocomplete="username" required></label>
-        <label>Password<input name="password" type="password" minlength="8" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}" required></label>
+        ${pwField('Password', mode === 'login' ? 'current-password' : 'new-password')}
         ${mode === 'register' ? `<label>Signup code (if your provider gave you one)<input name="signupCode"></label>` : ''}
         <button class="btn" type="submit">${mode === 'login' ? 'Sign in' : 'Create school account'}</button>
       </form>
@@ -257,7 +262,7 @@
         <p>API key: <code id="key">${esc(school.api_key)}</code> <button class="btn ghost" data-a="rotate">Generate new key</button></p></div>
       <div class="card"><h3>Staff accounts</h3>
         <table><tbody>${users.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td><span class="pill">${u.role}</span></td></tr>`).join('')}</tbody></table>
-        <form id="staffForm" class="grid" style="margin-top:12px"><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label><label>Temporary password<input name="password" type="password" minlength="8" required></label><div style="align-self:end"><button class="btn" type="submit">Add teacher</button></div></form></div>` : `<div class="card muted">Only school admins can change settings.</div>`}`;
+        <form id="staffForm" class="grid" style="margin-top:12px"><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label>${pwField('Temporary password', 'new-password')}<div style="align-self:end"><button class="btn" type="submit">Add teacher</button></div></form></div>` : `<div class="card muted">Only school admins can change settings.</div>`}`;
     $('#schoolForm')?.addEventListener('submit', guard(async (e) => {
       e.preventDefault();
       const b = Object.fromEntries(new FormData(e.target)); b.auto_send_absence = !!b.auto_send_absence;
@@ -275,6 +280,15 @@
     if (a === 'mode-register') renderAuth('register');
     else if (a === 'mode-login') renderAuth('login');
     else if (a === 'nav') { setView(el.dataset.v); }
+    else if (a === 'togglepw') {
+      const input = $('input', el.closest('.pw'));
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      el.innerHTML = show ? EYE_OFF : EYE;
+      el.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+      el.setAttribute('aria-pressed', String(show));
+      input.focus();
+    }
     else if (a === 'logout') { await api('/auth/logout', { method: 'POST' }); S.me = null; renderAuth(); }
     else if (a === 'pick') {
       const c = el.dataset.c;
@@ -310,6 +324,5 @@
     toast('Saved');
   }));
 
-  window.PCB = { toast, me: () => S.me, goto: (v) => setView(v), refresh: async () => { S.classes = await api('/classes'); await refreshCounts(); renderShell(); }, showDrafts: async () => { S.group = 'draft'; S.classes = await api('/classes'); await refreshCounts(); setView('messages'); } }; /* SM-CONNECTION */
   boot();
 })();
