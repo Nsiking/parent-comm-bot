@@ -324,5 +324,6 @@
     toast('Saved');
   }));
 
+  window.PCB = { toast, me: () => S.me, goto: (v) => setView(v), refresh: async () => { S.classes = await api('/classes'); await refreshCounts(); renderShell(); }, showDrafts: async () => { S.group = 'draft'; S.classes = await api('/classes'); await refreshCounts(); setView('messages'); } }; /* SM-CONNECTION */
   boot();
 })();

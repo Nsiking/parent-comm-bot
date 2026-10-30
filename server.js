@@ -400,6 +400,27 @@ app.post('/webhooks/whatsapp', (req, res) => {
   res.sendStatus(200);
 });
 
+/* SM-CONNECTION: link to SmartClass School Management (all of it lives in schoolmgmt.js).
+   If it ever fails to start, the Parent Bot carries on exactly as before and only logs the reason. */
+try {
+  require('./schoolmgmt')(app, { db, requireAuth, requireAdmin, hash, sign, setCookie, ai, ch, queueAndSend, wrap });
+} catch (e) {
+  console.error('School Management connection could not start:', e.message);
+}
+
+/* BK-BACKUP: automatic off-site backups (Cloudflare R2). Only the owner account (the first administrator) can see them, because a backup holds every school's data.
+   Does nothing until the BACKUP_S3_* settings exist. If it ever fails to start, the Bot carries on exactly as before and only logs the reason. */
+try {
+  const owner = (req, res, next) => {
+    const first = db.prepare("SELECT MIN(id) AS id FROM users WHERE role='admin'").get();
+    if (!first || first.id !== req.user.id) return res.status(403).json({ error: 'Only the owner account can manage backups' });
+    next();
+  };
+  require('./backup-setup')(app, { db, guards: [requireAuth, requireAdmin, owner] });
+} catch (e) {
+  console.error('Automatic backups could not start:', e.message);
+}
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;
