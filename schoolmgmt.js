@@ -248,6 +248,16 @@ module.exports = function mountSchoolManagement(app, ctx) {
     return finalize(t, school, c.channel);
   }
 
+  // A "Pay online" link from School Management, kept only if it really points at the School Management this school is connected to.
+  // It is added AFTER the wording (written by us or by the AI), so the AI can never change or drop it.
+  const payLinkOf = (conn, row) => {
+    const u = row && row.pay_url;
+    if (typeof u !== 'string' || u.length > 200 || !/^https?:\/\/[^\s]+$/.test(u)) return null;
+    let origin; try { origin = new URL(conn.url).origin; } catch (_) { return null; }
+    return u.startsWith(origin + '/p/') ? u : null;
+  };
+  const withPayLink = (body, link) => (link && !body.includes(link) ? `${body}\n\nPay online (secure): ${link}` : body);
+
   app.post('/api/sm/fee-drafts', requireAuth, route(async (req, res) => {
     const sid = req.user.school_id, b = req.body || {};
     const school = db.prepare('SELECT * FROM schools WHERE id = ?').get(sid);
@@ -273,7 +283,9 @@ module.exports = function mountSchoolManagement(app, ctx) {
       families++; totalOwed += row.owed_total;
       for (const c of live) targets.push({ c, row });
     }
-    const summary = { term: `${term.name} ${term.year}`, families, messages: targets.length, total_owed: totalOwed, no_contact: noContact.slice(0, 30), no_contact_count: noContact.length, opted_out: optedOut, ai: !!process.env.ANTHROPIC_API_KEY, dry_run: dryRun() };
+    const wantLinks = b.pay_links !== false;
+    const linkCount = wantLinks ? targets.filter((t) => payLinkOf(conn, t.row)).length : 0;
+    const summary = { term: `${term.name} ${term.year}`, families, messages: targets.length, total_owed: totalOwed, no_contact: noContact.slice(0, 30), no_contact_count: noContact.length, opted_out: optedOut, ai: !!process.env.ANTHROPIC_API_KEY, dry_run: dryRun(), pay_links: linkCount };
     if (b.preview) return res.json(summary);
     if (!targets.length) throw new SmError(balances.length ? 'None of the families who owe fees could be messaged. Import the parents from School Management first, or check the class you chose.' : 'Nobody owes fees at the moment. Nothing to remind.', 409);
     if (targets.length > 200) throw new SmError(`That is ${targets.length} messages. Draft up to 200 at a time: choose a class.`, 400);
@@ -298,7 +310,7 @@ module.exports = function mountSchoolManagement(app, ctx) {
         const d = drafts[c.id];
         // an amount in a message must be the real one: if the AI left it out or changed it, use the built-in wording
         const useAi = d && d.ai && mentionsAmount(d.body, row.owed_total);
-        const body = useAi ? d.body : feeTemplate(school, c, row, term, extra);
+        const body = withPayLink(useAi ? d.body : feeTemplate(school, c, row, term, extra), wantLinks ? payLinkOf(conn, row) : null);
         try { insert.run(sid, batch, c.id, c.phone, c.channel, body, useAi ? 1 : 0, `fees:${c.id}:${today}`); made++; useAi ? aiUsed++ : templates++; } catch (_) { already++; }
       }
       if (!made) db.prepare('DELETE FROM batches WHERE id = ?').run(batch);

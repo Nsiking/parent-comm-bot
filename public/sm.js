@@ -77,7 +77,8 @@
       + '<label>Only if they owe at least (\u20A6)<input id="smmin" type="number" min="1" value="1"></label>'
       + '<label>Tone<select id="smtone">' + Object.keys(me.tones).map(function (k) { return '<option value="' + k + '"' + (me.school.default_tone === k ? ' selected' : '') + '>' + esc(me.tones[k]) + '</option>'; }).join('') + '</select></label>'
       + '<label>Language<select id="smlang">' + me.languages.map(function (l) { return '<option' + (me.school.default_language === l ? ' selected' : '') + '>' + esc(l) + '</option>'; }).join('') + '</select></label>'
-      + (sm.ai ? '<label class="check" style="align-self:end"><input type="checkbox" id="smai" checked> Word with AI (the amount is always checked)</label>' : '') + '</div>'
+      + (sm.ai ? '<label class="check" style="align-self:end"><input type="checkbox" id="smai" checked> Word with AI (the amount is always checked)</label>' : '')
+      + '<label class="check" style="align-self:end"><input type="checkbox" id="smlink" checked> Add a secure \u201cPay online\u201d link when the school has online payments on</label></div>'
       + '<label style="display:block;margin-top:10px">Extra words (optional)<textarea id="smextra" placeholder="e.g. Please pay at the bursar\u2019s office or into the school account by Friday."></textarea></label>'
       + '<div class="row" style="margin-top:10px"><button class="btn ghost" id="smcheck">Check who owes</button><button class="btn" id="smfees">Draft fee reminders</button></div><p class="small" id="smfeemsg" style="margin:8px 0 0"></p>'
       + '<h4 style="margin:18px 0 4px">Absence alerts from the register</h4><p class="small muted" style="margin:0 0 10px">Drafts an alert for every pupil School Management has marked absent (or late) on a day. Pupils already alerted that day are skipped.</p>'
@@ -85,7 +86,7 @@
     var anchor = view.querySelector('.head'); (anchor ? anchor : view.firstChild).insertAdjacentHTML('afterend', html);
     var $ = function (id) { return document.getElementById(id); };
     function feeBody(preview) {
-      return { term_id: Number($('smterm').value), classes: $('smcls').value ? [$('smcls').value] : [], min_naira: Number($('smmin').value) || 1, tone: $('smtone').value, language: $('smlang').value, facts: $('smextra').value, use_ai: $('smai') ? $('smai').checked : false, preview: !!preview };
+      return { term_id: Number($('smterm').value), classes: $('smcls').value ? [$('smcls').value] : [], min_naira: Number($('smmin').value) || 1, tone: $('smtone').value, language: $('smlang').value, facts: $('smextra').value, use_ai: $('smai') ? $('smai').checked : false, pay_links: $('smlink') ? $('smlink').checked : true, preview: !!preview };
     }
     $('smcheck').addEventListener('click', function () {
       var m = $('smfeemsg'); msg(m, 'Checking\u2026');
@@ -93,6 +94,7 @@
         var t = r.families + ' famil' + (r.families === 1 ? 'y owes' : 'ies owe') + ' ' + naira(r.total_owed) + ' in total (' + r.term + '). ' + r.messages + ' message' + (r.messages === 1 ? '' : 's') + ' would be drafted.';
         if (r.no_contact_count) t += ' ' + r.no_contact_count + ' owing pupils have no parent in your list (' + r.no_contact.slice(0, 4).map(function (x) { return x.pupil; }).join(', ') + (r.no_contact_count > 4 ? '\u2026' : '') + '). Use \u201cImport parents\u201d on the Parents page.';
         if (r.opted_out) t += ' ' + r.opted_out + ' opted out of messages.';
+        if (r.pay_links) t += ' ' + r.pay_links + ' will include a secure \u201cPay online\u201d link (it makes the message longer, so an SMS may be sent in 2 or 3 parts).';
         if (r.dry_run) t += ' Careful: SMS and WhatsApp are both in test mode (dry-run) on this server, so nothing would really be delivered. See Settings.';
         msg(m, t);
       }).catch(function (e) { msg(m, e.message, true); });
