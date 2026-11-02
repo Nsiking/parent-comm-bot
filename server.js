@@ -421,6 +421,19 @@ try {
   console.error('Automatic backups could not start:', e.message);
 }
 
+/* PW-RESET: password reset by email (a 6-digit code). Does nothing visible until the EMAIL_* settings exist.
+   Only the owner account (the first administrator) sees its status card. If it ever fails to start, the Bot carries on exactly as before and only logs the reason. */
+try {
+  const resetOwner = (req, res, next) => {
+    const first = db.prepare("SELECT MIN(id) AS id FROM users WHERE role='admin'").get();
+    if (!first || first.id !== req.user.id) return res.status(403).json({ error: 'Only the owner account can manage this' });
+    next();
+  };
+  require('./reset-setup')(app, { db, hash, guards: [requireAuth, requireAdmin, resetOwner] });
+} catch (e) {
+  console.error('Password reset could not start:', e.message);
+}
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;

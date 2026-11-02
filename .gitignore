@@ -13,3 +13,6 @@ apply-sm-connection.js
 *.backup-status.json
 bk-backup-*/
 apply-backup.js
+*.resetsecret
+pw-backup-*/
+apply-reset.js
