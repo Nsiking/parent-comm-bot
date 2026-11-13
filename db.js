@@ -80,6 +80,9 @@ const hasCol = (t, c) => db.prepare(`PRAGMA table_info(${t})`).all().some((x) =>
 if (!hasCol('contacts', 'consent_at')) db.exec('ALTER TABLE contacts ADD COLUMN consent_at TEXT');
 if (!hasCol('contacts', 'consent_source')) db.exec('ALTER TABLE contacts ADD COLUMN consent_source TEXT');
 if (!hasCol('schools', 'require_consent')) db.exec('ALTER TABLE schools ADD COLUMN require_consent INTEGER NOT NULL DEFAULT 0');
+// Scheduled sending ("send later"): the time is kept in UTC, like every other time in this database.
+if (!hasCol('messages', 'scheduled_at')) db.exec('ALTER TABLE messages ADD COLUMN scheduled_at TEXT');
+db.exec('CREATE INDEX IF NOT EXISTS idx_messages_scheduled ON messages(status, scheduled_at)');
 
 // Anything left "queued" by a crash/restart goes back to draft so nothing is silently lost.
 db.prepare("UPDATE messages SET status='draft' WHERE status='queued'").run();

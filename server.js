@@ -301,14 +301,14 @@ app.post('/api/drafts', requireAuth, wrap(async (req, res) => {
 }));
 
 // ---------------------------------------------------------------- messages
-const GROUPS = { draft: ['draft'], sent: ['queued', 'sent', 'delivered', 'read'], failed: ['failed', 'skipped'] };
+const GROUPS = { draft: ['draft'], scheduled: ['scheduled'], sent: ['queued', 'sent', 'delivered', 'read'], failed: ['failed', 'skipped'] };
 
 app.get('/api/messages', requireAuth, (req, res) => {
   const statuses = GROUPS[req.query.group] || GROUPS.draft;
-  const rows = db.prepare(`SELECT m.*, c.student_name, c.parent_name, c.class_name, b.kind
+  const rows = db.prepare(`SELECT m.*, c.student_name, c.parent_name, c.class_name, b.kind, datetime(m.scheduled_at, '+1 hour') AS scheduled_wat
     FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id LEFT JOIN batches b ON b.id=m.batch_id
     WHERE m.school_id=? AND m.status IN (${placeholders(statuses.length)})
-    ORDER BY m.id DESC LIMIT 300`).all(req.user.school_id, ...statuses);
+    ORDER BY ${req.query.group === 'scheduled' ? 'm.scheduled_at ASC, m.id ASC' : 'm.id DESC'} LIMIT 300`).all(req.user.school_id, ...statuses);
   const counts = {};
   for (const [g, s] of Object.entries(GROUPS))
     counts[g] = db.prepare(`SELECT COUNT(*) n FROM messages WHERE school_id=? AND status IN (${placeholders(s.length)})`).get(req.user.school_id, ...s).n;
@@ -384,7 +384,7 @@ app.post('/api/messages/send', requireAuth, (req, res) => {
 const WHEN_SQL = "datetime(COALESCE(m.sent_at, m.created_at), '+1 hour')";
 const KIND_SQL = "CASE WHEN b.kind IS NOT NULL THEN b.kind WHEN m.dedupe_key LIKE 'absence:%' THEN 'absence' WHEN m.dedupe_key LIKE 'late:%' THEN 'late' ELSE NULL END";
 const HISTORY_FROM = 'FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id LEFT JOIN batches b ON b.id=m.batch_id';
-const HISTORY_STATUS = { sent: ['queued', 'sent', 'delivered', 'read'], failed: ['failed'], skipped: ['skipped'], draft: ['draft'] };
+const HISTORY_STATUS = { sent: ['queued', 'sent', 'delivered', 'read'], failed: ['failed'], skipped: ['skipped'], draft: ['draft'], scheduled: ['scheduled'] };
 
 function historyFilter(schoolId, query) {
   const where = ['m.school_id=?'];
@@ -448,9 +448,9 @@ app.get('/api/messages/summary', requireAuth, (req, res) => {
   const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(String(req.query.month || '')) ? String(req.query.month) : new Date(Date.now() + 3600e3).toISOString().slice(0, 7);
   const found = db.prepare(`SELECT m.status AS status, m.channel AS channel, c.class_name AS class_name, ${KIND_SQL} AS kind, COUNT(*) AS n
     ${HISTORY_FROM} WHERE m.school_id=? AND strftime('%Y-%m', ${WHEN_SQL}) = ? GROUP BY m.status, m.channel, c.class_name, kind`).all(req.user.school_id, month);
-  const totals = { sent: 0, delivered: 0, failed: 0, skipped: 0, draft: 0, whatsapp: 0, sms: 0 };
+  const totals = { sent: 0, delivered: 0, failed: 0, skipped: 0, draft: 0, scheduled: 0, whatsapp: 0, sms: 0 };
   const byKind = {}, byClass = {};
-  const add = (map, key, label, bucket, n) => { const e = map[key] || (map[key] = { key, label, sent: 0, failed: 0, skipped: 0, draft: 0 }); e[bucket] += n; };
+  const add = (map, key, label, bucket, n) => { const e = map[key] || (map[key] = { key, label, sent: 0, failed: 0, skipped: 0, draft: 0, scheduled: 0 }); e[bucket] += n; };
   for (const r of found) {
     const bucket = ['queued', 'sent', 'delivered', 'read'].includes(r.status) ? 'sent' : r.status;
     totals[bucket] += r.n;
@@ -459,7 +459,7 @@ app.get('/api/messages/summary', requireAuth, (req, res) => {
     add(byKind, r.kind || '', ai.KINDS[r.kind] || 'Other', bucket, r.n);
     add(byClass, r.class_name == null ? '\u0000' : r.class_name, r.class_name == null ? '(parent removed)' : (r.class_name || 'No class'), bucket, r.n);
   }
-  const order = (map) => Object.values(map).sort((a, b) => (b.sent + b.failed + b.skipped + b.draft) - (a.sent + a.failed + a.skipped + a.draft) || a.label.localeCompare(b.label));
+  const order = (map) => Object.values(map).sort((a, b) => (b.sent + b.failed + b.skipped + b.draft + b.scheduled) - (a.sent + a.failed + a.skipped + a.draft + a.scheduled) || a.label.localeCompare(b.label));
   res.json({ month, totals, by_kind: order(byKind), by_class: order(byClass) });
 });
 
@@ -620,6 +620,57 @@ app.post('/webhooks/termii/:token', (req, res) => {
   } catch (e) { console.error('Termii webhook error', e); }
   res.sendStatus(200);
 });
+
+// ---------------------------------------------------------------- scheduled sending ("send later")
+// Times typed by staff are Nigerian time (WAT, UTC+1); the database keeps UTC.
+const SCHEDULE_GRACE_HOURS = 6;   // if the server was off and a time is this overdue, a stale message is NOT sent
+
+app.post('/api/messages/schedule', requireAuth, (req, res) => {
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+  if (!ids.length) return res.status(400).json({ error: 'Select at least one message' });
+  const typed = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})$/.exec(String(req.body?.at || '').trim());
+  const when = typed ? new Date(`${typed[1]}T${typed[2]}:00+01:00`) : null;
+  if (!when || Number.isNaN(when.getTime())) return res.status(400).json({ error: 'Choose a date and time' });
+  const ahead = when.getTime() - Date.now();
+  if (ahead < 2 * 60 * 1000) return res.status(400).json({ error: 'Choose a time at least 2 minutes from now (Nigerian time)' });
+  if (ahead > 90 * 24 * 3600 * 1000) return res.status(400).json({ error: 'Choose a date within the next 90 days' });
+  const utc = when.toISOString().slice(0, 19).replace('T', ' ');
+  const r = db.prepare(`UPDATE messages SET status='scheduled', scheduled_at=?, error=NULL WHERE school_id=? AND status='draft' AND id IN (${placeholders(ids.length)})`)
+    .run(utc, req.user.school_id, ...ids);
+  res.json({ scheduled: r.changes, at_wat: `${typed[1]} ${typed[2]}` });
+});
+
+app.post('/api/messages/unschedule', requireAuth, (req, res) => {
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+  if (!ids.length) return res.status(400).json({ error: 'Select at least one message' });
+  const r = db.prepare(`UPDATE messages SET status='draft', scheduled_at=NULL WHERE school_id=? AND status='scheduled' AND id IN (${placeholders(ids.length)})`)
+    .run(req.user.school_id, ...ids);
+  res.json({ cancelled: r.changes });
+});
+
+// Every 30 seconds: messages whose time has come go through the normal sending path (opt-out, consent and the daily limit are checked there).
+function runScheduled() {
+  try {
+    const due = db.prepare(`SELECT id, school_id, datetime(scheduled_at, '+1 hour') AS wat, scheduled_at < datetime('now', ?) AS stale
+      FROM messages WHERE status='scheduled' AND scheduled_at <= datetime('now') ORDER BY scheduled_at, id`).all(`-${SCHEDULE_GRACE_HOURS} hours`);
+    const bySchool = {};
+    for (const d of due) {
+      if (d.stale) {
+        db.prepare("UPDATE messages SET status='draft', scheduled_at=NULL, error=? WHERE id=? AND status='scheduled'")
+          .run(`The scheduled time (${String(d.wat).slice(0, 16)}, Nigerian time) passed while the system was offline, so it was not sent. Review it and send it again.`, d.id);
+      } else (bySchool[d.school_id] = bySchool[d.school_id] || []).push(d.id);
+    }
+    for (const [sid, ids] of Object.entries(bySchool)) {
+      db.prepare(`UPDATE messages SET status='draft', scheduled_at=NULL WHERE status='scheduled' AND id IN (${placeholders(ids.length)})`).run(...ids);
+      queueAndSend(Number(sid), ids);
+      db.prepare(`UPDATE messages SET error='The daily sending limit was reached at the scheduled time. Send it again from Drafts.' WHERE status='draft' AND id IN (${placeholders(ids.length)})`).run(...ids);
+    }
+  } catch (e) { console.error('Scheduled sending error', e); }
+}
+const scheduleTimer = setInterval(runScheduled, Number(process.env.SCHEDULE_CHECK_SECONDS || 30) * 1000);
+if (scheduleTimer.unref) scheduleTimer.unref();
+const firstScheduleCheck = setTimeout(runScheduled, 5000);
+if (firstScheduleCheck.unref) firstScheduleCheck.unref();
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 

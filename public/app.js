@@ -142,27 +142,31 @@
   };
   function viewMessages() {
     const g = S.group, c = S.counts;
-    const isDraft = g === 'draft';
+    const isDraft = g === 'draft', isSched = g === 'scheduled';
     $('#view').innerHTML = `
       <div class="head"><div><h1>Messages</h1><p class="muted">Edit any message, then send. Parents who opted out are skipped automatically.</p></div>
-        ${isDraft && S.msgs.length ? `<div class="row"><label class="check"><input type="checkbox" id="all" checked data-a="toggle-all"> Select all</label><button class="btn" data-a="send">Send selected</button></div>` : ''}
+        ${isDraft && S.msgs.length ? `<div class="row"><label class="check"><input type="checkbox" id="all" checked data-a="toggle-all"> Select all</label><button class="btn" data-a="send">Send selected</button><button class="btn ghost" data-a="sched-open">Send later</button></div>` : ''}
+        ${isSched && S.msgs.length ? `<div class="row"><label class="check"><input type="checkbox" id="all" checked data-a="toggle-all"> Select all</label><button class="btn ghost" data-a="unschedule">Cancel schedule</button></div>` : ''}
       </div>
+      ${isDraft && S.msgs.length ? `<div class="card" id="schedPanel" hidden><h3>Send later</h3>
+        <p class="small muted" style="margin:6px 0 10px">Choose when the selected messages should go out. Times are Nigerian time. Opt-outs, consent and your daily limit are checked again at that moment.</p>
+        <div class="row"><label>Date and time<input type="datetime-local" id="schedAt" value="${schedDefault()}" min="${watNow()}"></label><button class="btn" data-a="sched-go">Schedule selected</button></div></div>` : ''}
       <div class="chips" style="margin-bottom:14px">
-        ${[['draft', 'Drafts'], ['sent', 'Sent'], ['failed', 'Needs attention']].map(([id, l]) => `<button class="chip ${g === id ? 'on' : ''}" data-a="group" data-g="${id}">${l} (${c[id] || 0})</button>`).join('')}
+        ${[['draft', 'Drafts'], ['scheduled', 'Scheduled'], ['sent', 'Sent'], ['failed', 'Needs attention']].map(([id, l]) => `<button class="chip ${g === id ? 'on' : ''}" data-a="group" data-g="${id}">${l} (${c[id] || 0})</button>`).join('')}
       </div>
       ${S.msgs.length ? S.msgs.map((m) => `<div class="msg" data-id="${m.id}">
-        <header>${isDraft || g === 'failed' ? `<input type="checkbox" class="pick" style="width:auto" ${isDraft ? 'checked' : ''} aria-label="Select message">` : ''}
+        <header>${isDraft || isSched || g === 'failed' ? `<input type="checkbox" class="pick" style="width:auto" ${isDraft || isSched ? 'checked' : ''} aria-label="Select message">` : ''}
           <span class="who">${esc(m.parent_name || 'Parent')} <span class="muted" style="font-weight:400">for ${esc(m.student_name || '')}${m.class_name ? ', ' + esc(m.class_name) : ''}</span></span>
           <span class="pill ${m.channel === 'sms' ? 'sms' : 'wa'}">${m.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span>
-          ${!isDraft ? `<span class="pill ${m.status}">${m.status}</span>` : ''}
+          ${!isDraft ? `<span class="pill ${m.status === 'scheduled' ? 'queued' : m.status}">${m.status === 'scheduled' ? 'Sends ' + esc(String(m.scheduled_wat).slice(0, 16)) : m.status}</span>` : ''}
           ${m.ai ? '<span class="pill">AI draft</span>' : ''}
           <span class="spacer"></span><span class="small muted">+${esc(m.phone)}</span></header>
         ${isDraft || g === 'failed' ? `<textarea>${esc(m.body)}</textarea>` : `<div style="white-space:pre-wrap">${esc(m.body)}</div>`}
         ${m.error ? `<div class="${m.status === 'failed' || m.status === 'skipped' ? 'err' : 'small muted'}" style="margin-top:6px">${esc(m.error)}</div>` : ''}
         <footer>${isDraft || g === 'failed' ? `<span class="small muted count">${counter(m, m.body)}</span><span class="spacer"></span>
           ${g === 'failed' && m.status === 'failed' ? `<button class="btn ghost" data-a="retry">Retry</button>` : ''}
-          <button class="btn danger" data-a="discard">Discard</button>` : `<span class="small muted">${esc(m.sent_at || '')}</span>`}</footer></div>`).join('')
-      : `<div class="card empty">${isDraft ? 'No drafts waiting. Start from Compose.' : g === 'sent' ? 'Nothing sent yet.' : 'Nothing needs attention.'}</div>`}`;
+          <button class="btn danger" data-a="discard">Discard</button>` : isSched ? `<span class="spacer"></span><button class="btn ghost" data-a="unschedule-one">Cancel schedule</button>` : `<span class="small muted">${esc(m.sent_at || '')}</span>`}</footer></div>`).join('')
+      : `<div class="card empty">${isDraft ? 'No drafts waiting. Start from Compose.' : isSched ? 'Nothing is scheduled.' : g === 'sent' ? 'Nothing sent yet.' : 'Nothing needs attention.'}</div>`}`;
     clearInterval(S.poll);
     if (g === 'sent' && S.msgs.some((m) => m.status === 'queued' || m.status === 'sent')) {
       S.poll = setInterval(async () => { await refreshCounts(); if (S.view === 'messages' && S.group === 'sent') viewMessages(); else clearInterval(S.poll); }, 4000);
@@ -201,18 +205,37 @@
     head.forEach((h, i) => { const k = h.trim().toLowerCase().replace(/[\s-]+/g, '_'); for (const [f, al] of Object.entries(ALIAS)) if (al.includes(k) && idx[f] === undefined) idx[f] = i; });
     return body.map((r) => Object.fromEntries(Object.entries(idx).map(([f, i]) => [f, (r[i] || '').trim()])));
   }
+  // ---------- send later (scheduled sending). Times are Nigerian time (UTC+1), whatever the browser's own time zone is.
+  const watNow = () => new Date(Date.now() + 3600e3).toISOString().slice(0, 16);
+  const schedDefault = () => { const t = new Date(Date.now() + 3600e3); t.setUTCDate(t.getUTCDate() + 1); t.setUTCHours(7, 0, 0, 0); return t.toISOString().slice(0, 16); };
+  const schedule = guard(async () => {
+    const ids = selectedIds();
+    if (!ids.length) return toast('Select at least one message', true);
+    const at = $('#schedAt').value;
+    if (!at) return toast('Choose a date and time', true);
+    const r = await api('/messages/schedule', { method: 'POST', body: { ids, at } });
+    toast(`${r.scheduled} message${r.scheduled === 1 ? '' : 's'} scheduled for ${r.at_wat} (Nigerian time)`);
+    S.group = 'scheduled'; await refreshCounts(); setView('messages');
+  });
+  const unschedule = guard(async (ids) => {
+    if (!ids.length) return toast('Select at least one message', true);
+    const r = await api('/messages/unschedule', { method: 'POST', body: { ids } });
+    toast(`${r.cancelled} message${r.cancelled === 1 ? '' : 's'} back in Drafts`);
+    S.group = 'draft'; await refreshCounts(); setView('messages');
+  });
+
   // ---------- history, export and monthly summary
-  const STATUS_LABEL = { sent: 'Sent', delivered: 'Delivered', read: 'Read', queued: 'Sending', failed: 'Failed', skipped: 'Held back', draft: 'Draft' };
+  const STATUS_LABEL = { sent: 'Sent', delivered: 'Delivered', read: 'Read', queued: 'Sending', failed: 'Failed', skipped: 'Held back', draft: 'Draft', scheduled: 'Scheduled' };
   const prettyPhone = (p) => (/^234\d{10}$/.test(p) ? `+234 ${p.slice(3, 6)} ${p.slice(6, 9)} ${p.slice(9)}` : '+' + p);
   const histQuery = (f, extra = {}) => new URLSearchParams(Object.entries({ q: f.q, status: f.status, kind: f.kind, from: f.from, to: f.to, ...extra }).filter(([, v]) => v !== '' && v != null)).toString();
   const histRows = (rows) => rows.map((m) => `<tr><td class="small" style="white-space:nowrap">${esc(String(m.at).slice(0, 16))}</td>
       <td>${esc(m.parent_name || 'Parent')}<div class="small muted">${esc(m.student_name || '')}${m.class_name ? ', ' + esc(m.class_name) : ''}</div></td>
       <td class="small">${esc(S.me.kinds[m.kind] || '')}</td>
       <td><span class="pill ${m.channel === 'sms' ? 'sms' : 'wa'}">${m.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span></td>
-      <td><span class="pill ${m.status}">${STATUS_LABEL[m.status] || esc(m.status)}</span></td>
+      <td><span class="pill ${m.status === 'scheduled' ? 'queued' : m.status}">${STATUS_LABEL[m.status] || esc(m.status)}</span></td>
       <td><div class="small" title="${esc(m.body)}">${esc(m.body.length > 120 ? m.body.slice(0, 120) + '…' : m.body)}</div>${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}</td></tr>`).join('');
-  const histBreakdown = (title, list) => `<div><h3>${title}</h3>${list.length ? `<div class="tablewrap"><table><thead><tr><th></th><th>Sent</th><th>Failed</th><th>Held back</th><th>Drafts</th></tr></thead><tbody>
-      ${list.map((e) => `<tr><td>${esc(e.label)}</td><td>${e.sent}</td><td>${e.failed}</td><td>${e.skipped}</td><td>${e.draft}</td></tr>`).join('')}</tbody></table></div>` : '<p class="small muted">No messages in this month.</p>'}</div>`;
+  const histBreakdown = (title, list) => `<div><h3>${title}</h3>${list.length ? `<div class="tablewrap"><table><thead><tr><th></th><th>Sent</th><th>Failed</th><th>Held back</th><th>Drafts</th><th>Scheduled</th></tr></thead><tbody>
+      ${list.map((e) => `<tr><td>${esc(e.label)}</td><td>${e.sent}</td><td>${e.failed}</td><td>${e.skipped}</td><td>${e.draft}</td><td>${e.scheduled}</td></tr>`).join('')}</tbody></table></div>` : '<p class="small muted">No messages in this month.</p>'}</div>`;
   function renderHistory() {
     const h = S.hist, f = h.applied, t = h.sum.totals;
     const sel = (cur, v, l) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`;
@@ -221,12 +244,12 @@
       <div class="head"><div><h1>History</h1><p class="muted">Every message the bot has drafted, sent or held back. Times are Nigerian time.</p></div>
         <button class="btn" data-a="hist-csv">Download CSV</button></div>
       <div class="card"><div class="row"><h3>Summary for</h3><input type="month" id="histMonth" value="${esc(h.month)}" style="max-width:190px"></div>
-        <div class="grid" style="margin-top:12px">${tile('Sent', t.sent)}${tile('Failed', t.failed)}${tile('Held back', t.skipped)}${tile('Drafts waiting', t.draft)}</div>
+        <div class="grid" style="margin-top:12px">${tile('Sent', t.sent)}${tile('Failed', t.failed)}${tile('Held back', t.skipped)}${tile('Drafts waiting', t.draft)}${tile('Scheduled', t.scheduled)}</div>
         <p class="small muted" style="margin:10px 0 14px">${t.whatsapp} by WhatsApp, ${t.sms} by SMS. ${t.delivered} confirmed delivered (WhatsApp, and SMS once delivery reports are connected in Settings). Held back means the parent opted out or has no consent recorded.</p>
         <div class="grid">${histBreakdown('By type', h.sum.by_kind)}${histBreakdown('By class', h.sum.by_class)}</div></div>
       <div class="card"><div class="grid">
         <label>Search<input id="hq" value="${esc(f.q)}" placeholder="Parent, student, class or phone"></label>
-        <label>Status<select id="hstatus">${sel(f.status, '', 'All')}${sel(f.status, 'sent', 'Sent')}${sel(f.status, 'failed', 'Failed')}${sel(f.status, 'skipped', 'Held back')}${sel(f.status, 'draft', 'Drafts')}</select></label>
+        <label>Status<select id="hstatus">${sel(f.status, '', 'All')}${sel(f.status, 'sent', 'Sent')}${sel(f.status, 'failed', 'Failed')}${sel(f.status, 'skipped', 'Held back')}${sel(f.status, 'draft', 'Drafts')}${sel(f.status, 'scheduled', 'Scheduled')}</select></label>
         <label>Type<select id="hkind">${sel(f.kind, '', 'All types')}${Object.entries(S.me.kinds).map(([k, v]) => sel(f.kind, k, esc(v))).join('')}</select></label>
         <label>From<input type="date" id="hfrom" value="${esc(f.from)}"></label><label>To<input type="date" id="hto" value="${esc(f.to)}"></label>
         <div style="align-self:end"><button class="btn" data-a="hist-apply">Show</button></div></div></div>
@@ -367,6 +390,10 @@
     else if (a === 'toggle-all') document.querySelectorAll('.msg .pick').forEach((c) => (c.checked = el.checked));
     else if (a === 'send') await send();
     else if (a === 'retry') await send([+msgEl.dataset.id]);
+    else if (a === 'sched-open') { const p = $('#schedPanel'); p.hidden = !p.hidden; }
+    else if (a === 'sched-go') await schedule();
+    else if (a === 'unschedule') await unschedule(selectedIds());
+    else if (a === 'unschedule-one') await unschedule([+msgEl.dataset.id]);
     else if (a === 'discard') { await api('/messages/' + msgEl.dataset.id, { method: 'DELETE' }); await refreshCounts(); renderShell(); }
     else if (a === 'hist-apply') {
       S.hist.applied = { q: $('#hq').value.trim(), status: $('#hstatus').value, kind: $('#hkind').value, from: $('#hfrom').value, to: $('#hto').value };
