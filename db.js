@@ -75,6 +75,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(provider_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedupe ON messages(school_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
 `);
 
+// Consent record (NDPA). Columns are only ever ADDED.
+const hasCol = (t, c) => db.prepare(`PRAGMA table_info(${t})`).all().some((x) => x.name === c);
+if (!hasCol('contacts', 'consent_at')) db.exec('ALTER TABLE contacts ADD COLUMN consent_at TEXT');
+if (!hasCol('contacts', 'consent_source')) db.exec('ALTER TABLE contacts ADD COLUMN consent_source TEXT');
+if (!hasCol('schools', 'require_consent')) db.exec('ALTER TABLE schools ADD COLUMN require_consent INTEGER NOT NULL DEFAULT 0');
+
 // Anything left "queued" by a crash/restart goes back to draft so nothing is silently lost.
 db.prepare("UPDATE messages SET status='draft' WHERE status='queued'").run();
 

@@ -93,6 +93,7 @@ app.put('/api/school', requireAuth, requireAdmin, (req, res) => {
       ai.TONES[b.default_tone] ? b.default_tone : 'warm',
       ai.LANGUAGES.includes(b.default_language) ? b.default_language : 'English',
       b.auto_send_absence ? 1 : 0, req.user.school_id);
+  if ('require_consent' in b) db.prepare('UPDATE schools SET require_consent=? WHERE id=?').run(b.require_consent ? 1 : 0, req.user.school_id);
   res.json({ ok: true });
 });
 
@@ -119,7 +120,7 @@ app.post('/api/users', requireAuth, requireAdmin, (req, res) => {
 
 // ---------------------------------------------------------------- contacts
 app.get('/api/classes', requireAuth, (req, res) => {
-  res.json(db.prepare(`SELECT class_name AS name, COUNT(*) AS total, SUM(opted_out=0) AS reachable
+  res.json(db.prepare(`SELECT class_name AS name, COUNT(*) AS total, SUM(opted_out=0) AS reachable, SUM(opted_out=0 AND consent_at IS NOT NULL) AS consented, SUM(consent_at IS NOT NULL) AS with_consent
     FROM contacts WHERE school_id=? GROUP BY class_name ORDER BY class_name`).all(req.user.school_id));
 });
 
@@ -129,6 +130,21 @@ app.get('/api/contacts', requireAuth, (req, res) => {
       (lower(student_name) LIKE ? OR lower(parent_name) LIKE ? OR lower(class_name) LIKE ? OR phone LIKE ? OR lower(admission_no) LIKE ?)
       ORDER BY class_name, student_name LIMIT 500`).all(req.user.school_id, q, q, q, q, q));
 });
+
+// ---- consent record: where/when a parent agreed to receive messages
+const CONSENT_SOURCES = { admission_form: 'Admission form', verbal: 'Verbal', other: 'Other', imported: 'Imported list' };
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const validDay = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) && String(d) <= todayStr() ? String(d) : todayStr());
+function consentFrom(raw) {
+  const v = String(raw == null ? '' : raw).trim().toLowerCase();
+  if (!v || ['no', 'n', 'false', '0', 'none', 'not recorded'].includes(v)) return null;
+  return CONSENT_SOURCES[v] ? v : 'imported';
+}
+// Messages held back for "no consent" return to Drafts as soon as that parent's consent is recorded.
+function releaseHeld(schoolId) {
+  db.prepare(`UPDATE messages SET status='draft', error=NULL WHERE school_id=? AND status='skipped' AND error LIKE 'No consent recorded%'
+    AND contact_id IN (SELECT id FROM contacts WHERE school_id=? AND consent_at IS NOT NULL)`).run(schoolId, schoolId);
+}
 
 function cleanContact(b) {
   const phone = ch.normalizePhone(b.phone);
@@ -148,8 +164,9 @@ function cleanContact(b) {
 app.post('/api/contacts', requireAuth, (req, res) => {
   const c = cleanContact(req.body || {});
   if (c.error) return res.status(400).json({ error: c.error });
-  db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, admission_no, parent_name, phone, channel) VALUES (?,?,?,?,?,?,?)`)
-    .run(req.user.school_id, c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel);
+  const src = consentFrom((req.body || {}).consent);
+  db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, admission_no, parent_name, phone, channel, consent_at, consent_source) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run(req.user.school_id, c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel, src ? todayStr() : null, src);
   res.json({ ok: true });
 });
 
@@ -159,6 +176,16 @@ app.put('/api/contacts/:id', requireAuth, (req, res) => {
   const b = req.body || {};
   if (Object.keys(b).length === 1 && 'opted_out' in b) {
     db.prepare('UPDATE contacts SET opted_out=? WHERE id=?').run(b.opted_out ? 1 : 0, existing.id);
+    return res.json({ ok: true });
+  }
+  if ('consent_source' in b && Object.keys(b).every((k) => ['consent_source', 'consent_at'].includes(k))) {
+    const src = String(b.consent_source || '');
+    if (!src) db.prepare('UPDATE contacts SET consent_at=NULL, consent_source=NULL WHERE id=?').run(existing.id);
+    else if (CONSENT_SOURCES[src]) {
+      db.prepare('UPDATE contacts SET consent_at=?, consent_source=? WHERE id=?')
+        .run(b.consent_at ? validDay(b.consent_at) : (existing.consent_at || todayStr()), src, existing.id);
+      releaseHeld(req.user.school_id);
+    } else return res.status(400).json({ error: 'Unknown consent source' });
     return res.json({ ok: true });
   }
   const c = cleanContact({ ...existing, ...b });
@@ -180,18 +207,35 @@ app.post('/api/contacts/import', requireAuth, (req, res) => {
   let added = 0, updated = 0;
   const skipped = [];
   const find = db.prepare('SELECT id FROM contacts WHERE school_id=? AND phone=? AND lower(student_name)=lower(?)');
-  const ins = db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, admission_no, parent_name, phone, channel) VALUES (?,?,?,?,?,?,?)`);
+  const ins = db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, admission_no, parent_name, phone, channel, consent_at, consent_source) VALUES (?,?,?,?,?,?,?,?,?)`);
   const upd = db.prepare('UPDATE contacts SET class_name=?, admission_no=?, parent_name=?, channel=? WHERE id=?');
+  const setConsent = db.prepare('UPDATE contacts SET consent_at=?, consent_source=? WHERE id=? AND consent_at IS NULL');
   db.transaction(() => {
     rows.forEach((r, i) => {
       const c = cleanContact(r);
       if (c.error) return skipped.push({ row: i + 2, reason: c.error });
+      const src = consentFrom(r.consent);
       const hit = find.get(req.user.school_id, c.phone, c.student_name);
-      if (hit) { upd.run(c.class_name, c.admission_no, c.parent_name, c.channel, hit.id); updated++; }
-      else { ins.run(req.user.school_id, c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel); added++; }
+      if (hit) { upd.run(c.class_name, c.admission_no, c.parent_name, c.channel, hit.id); if (src) setConsent.run(todayStr(), src, hit.id); updated++; }
+      else { ins.run(req.user.school_id, c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel, src ? todayStr() : null, src); added++; }
     });
   })();
+  releaseHeld(req.user.school_id);
   res.json({ added, updated, skipped });
+});
+
+// Record consent for many parents at once (admin only). Only parents with no record yet are changed.
+app.post('/api/contacts/consent', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const src = String(b.source || '');
+  if (!CONSENT_SOURCES[src] || src === 'imported') return res.status(400).json({ error: 'Choose where the consent came from' });
+  const day = validDay(b.date);
+  const sid = req.user.school_id;
+  const all = b.class_name === '*';
+  const r = db.prepare(`UPDATE contacts SET consent_at=?, consent_source=? WHERE school_id=? AND consent_at IS NULL${all ? '' : ' AND class_name=?'}`)
+    .run(...(all ? [day, src, sid] : [day, src, sid, String(b.class_name || '')]));
+  releaseHeld(sid);
+  res.json({ updated: r.changes });
 });
 
 // ---------------------------------------------------------------- drafting
@@ -230,7 +274,14 @@ app.post('/api/drafts', requireAuth, wrap(async (req, res) => {
   }
   const total = contacts.length;
   contacts = contacts.filter((c) => !c.opted_out);
-  if (!contacts.length) return res.status(400).json({ error: total ? 'Everyone in this audience has opted out' : 'No parents found. Add or import parents first.' });
+  const optedOut = total - contacts.length;
+  let noConsent = 0;
+  if (db.prepare('SELECT require_consent FROM schools WHERE id=?').get(sid).require_consent) {
+    const before = contacts.length;
+    contacts = contacts.filter((c) => c.consent_at);
+    noConsent = before - contacts.length;
+  }
+  if (!contacts.length) return res.status(400).json({ error: total ? (noConsent ? 'No parent in this audience has a consent record yet. Record consent on the Parents page first.' : 'Everyone in this audience has opted out') : 'No parents found. Add or import parents first.' });
   if (contacts.length > 200) return res.status(400).json({ error: `That audience has ${contacts.length} parents. Draft up to 200 at a time (pick fewer classes).` });
 
   const school = db.prepare('SELECT * FROM schools WHERE id=?').get(sid);
@@ -246,7 +297,7 @@ app.post('/api/drafts', requireAuth, wrap(async (req, res) => {
     for (const c of contacts) ins.run(sid, b, c.id, c.phone, c.channel, drafts[c.id].body, drafts[c.id].ai);
     return b;
   })();
-  res.json({ batchId, count: contacts.length, aiDrafted: contacts.filter((c) => drafts[c.id].ai).length, optedOut: total - contacts.length });
+  res.json({ batchId, count: contacts.length, aiDrafted: contacts.filter((c) => drafts[c.id].ai).length, optedOut, noConsent });
 }));
 
 // ---------------------------------------------------------------- messages
@@ -285,12 +336,16 @@ function sentToday(schoolId) {
 
 async function dispatch(schoolId, ids) {
   const school = db.prepare('SELECT * FROM schools WHERE id=?').get(schoolId);
-  const get = db.prepare('SELECT m.*, c.opted_out FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id WHERE m.id=? AND m.school_id=?');
+  const get = db.prepare('SELECT m.*, c.opted_out, c.consent_at FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id WHERE m.id=? AND m.school_id=?');
   for (const id of ids) {
     const m = get.get(id, schoolId);
     if (!m || m.status !== 'queued') continue;
     if (m.opted_out) {
       db.prepare("UPDATE messages SET status='skipped', error='Parent opted out' WHERE id=?").run(id);
+      continue;
+    }
+    if (school.require_consent && !m.consent_at) {
+      db.prepare("UPDATE messages SET status='skipped', error='No consent recorded for this parent. Record it on the Parents page and this message returns to Drafts.' WHERE id=?").run(id);
       continue;
     }
     try {

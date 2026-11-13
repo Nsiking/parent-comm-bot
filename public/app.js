@@ -99,8 +99,8 @@
       </div></div>
       <div class="card"><h3>Send to</h3>
         ${S.classes.length ? `<div class="chips" style="margin-top:10px">
-          <button class="chip ${pickedAll ? 'on' : ''}" data-a="pick" data-c="*">Whole school (${S.classes.reduce((n, c) => n + c.reachable, 0)})</button>
-          ${S.classes.map((c) => `<button class="chip ${S.picked.has(c.name) ? 'on' : ''}" data-a="pick" data-c="${esc(c.name)}">${esc(c.name || 'No class')} (${c.reachable})</button>`).join('')}
+          <button class="chip ${pickedAll ? 'on' : ''}" data-a="pick" data-c="*">Whole school (${S.classes.reduce((n, c) => n + reach(c), 0)})</button>
+          ${S.classes.map((c) => `<button class="chip ${S.picked.has(c.name) ? 'on' : ''}" data-a="pick" data-c="${esc(c.name)}">${esc(c.name || 'No class')} (${reach(c)})</button>`).join('')}
         </div>` : `<p class="muted">No parents yet. <button class="link" data-a="nav" data-v="parents">Add or import parents</button> first.</p>`}
       </div>
       <div class="card">
@@ -125,7 +125,7 @@
         facts: $('#facts').value, notesText: $('#notes')?.value || '',
         classes: [...S.picked],
       } });
-      toast(`${d.count} drafts ready${d.aiDrafted < d.count ? ` (${d.count - d.aiDrafted} from templates)` : ''}. Review before sending.`);
+      toast(`${d.count} drafts ready${d.aiDrafted < d.count ? ` (${d.count - d.aiDrafted} from templates)` : ''}. Review before sending.${d.noConsent ? ` ${d.noConsent} left out: no consent recorded.` : ''}`);
       S.group = 'draft'; await refreshCounts(); setView('messages');
     } finally { btn.disabled = false; btn.textContent = 'Draft messages'; }
   });
@@ -194,15 +194,23 @@
     endRow();
     return rows;
   }
-  const ALIAS = { student_name: ['student_name', 'student', 'pupil', 'name', 'child'], class_name: ['class_name', 'class', 'grade'], parent_name: ['parent_name', 'parent', 'guardian', 'guardian_name'], phone: ['phone', 'phone_number', 'mobile', 'whatsapp', 'tel'], admission_no: ['admission_no', 'admission_number', 'reg_no', 'admission'], channel: ['channel', 'preferred_channel'] };
+  const ALIAS = { student_name: ['student_name', 'student', 'pupil', 'name', 'child'], class_name: ['class_name', 'class', 'grade'], parent_name: ['parent_name', 'parent', 'guardian', 'guardian_name'], phone: ['phone', 'phone_number', 'mobile', 'whatsapp', 'tel'], admission_no: ['admission_no', 'admission_number', 'reg_no', 'admission'], channel: ['channel', 'preferred_channel'], consent: ['consent', 'consent_given', 'agreed'] };
   function csvToRows(text) {
     const [head, ...body] = parseCSV(text);
     const idx = {};
     head.forEach((h, i) => { const k = h.trim().toLowerCase().replace(/[\s-]+/g, '_'); for (const [f, al] of Object.entries(ALIAS)) if (al.includes(k) && idx[f] === undefined) idx[f] = i; });
     return body.map((r) => Object.fromEntries(Object.entries(idx).map(([f, i]) => [f, (r[i] || '').trim()])));
   }
+  // ---------- consent record
+  const reach = (c) => (S.me.school.require_consent ? c.consented : c.reachable);
+  const CONSENT_OPTS = [['admission_form', 'Admission form'], ['verbal', 'Verbal'], ['other', 'Other']];
+  const consentOptions = (sel) => `<option value="">Not recorded</option>${CONSENT_OPTS.map(([v, l]) => `<option value="${v}" ${sel === v ? 'selected' : ''}>${l}</option>`).join('')}${sel === 'imported' ? '<option value="imported" selected>Imported list</option>' : ''}`;
+  const todayLocal = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+
   async function viewParents(q = '') {
     S.contacts = await api('/contacts?q=' + encodeURIComponent(q));
+    S.classes = await api('/classes');
+    const totalParents = S.classes.reduce((n, c) => n + c.total, 0), withConsent = S.classes.reduce((n, c) => n + (c.with_consent || 0), 0);
     $('#view').innerHTML = `
       <div class="head"><div><h1>Parents</h1><p class="muted">One row per child and parent/guardian. Numbers like 0803… are converted to +234 automatically.</p></div></div>
       <div class="card"><h3>Add a parent</h3>
@@ -210,15 +218,24 @@
           <label>Student name<input name="student_name" required></label><label>Class<input name="class_name" placeholder="JSS 1A"></label>
           <label>Parent name<input name="parent_name" placeholder="Mrs Okafor"></label><label>Phone<input name="phone" required placeholder="0803 123 4567"></label>
           <label>Admission no.<input name="admission_no"></label>
+          <label>Consent<select name="consent">${consentOptions("")}</select></label>
           <label>Send by<select name="channel"><option value="whatsapp">WhatsApp (SMS if it fails)</option><option value="sms">SMS only</option></select></label>
           <div style="align-self:end"><button class="btn" type="submit">Add parent</button></div></form></div>
       <div class="card"><h3>Import from CSV</h3>
-        <p class="small muted">Columns: student_name, class, parent_name, phone, admission_no, channel. <button class="link" data-a="template">Download a template</button></p>
+        <p class="small muted">Columns: student_name, class, parent_name, phone, admission_no, channel, consent (yes or no, optional). <button class="link" data-a="template">Download a template</button></p>
         <input type="file" id="csv" accept=".csv,text/csv"></div>
+      <div class="card"><h3>Parent consent</h3>
+        <p class="small muted" style="margin:6px 0 10px">Consent is recorded for <b>${withConsent}</b> of <b>${totalParents}</b> parents. Note where each parent agreed to receive messages (admission form or verbal). ${S.me.school.require_consent ? 'Messages are only sent to parents with consent recorded.' : 'You can make consent required in Settings.'}</p>
+        ${S.me.user.role === 'admin' ? `<div class="grid"><label>Class<select id="bkClass"><option value="*">All classes</option>${S.classes.map((c) => `<option value="${esc(c.name)}">${esc(c.name || 'No class')}</option>`).join('')}</select></label>
+          <label>Consent came from<select id="bkSource">${CONSENT_OPTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
+          <label>Date<input type="date" id="bkDate" value="${todayLocal()}" max="${todayLocal()}"></label>
+          <div style="align-self:end"><button class="btn" data-a="bulkconsent">Mark consent obtained</button></div></div>
+        <p class="small muted" style="margin:8px 0 0">Only parents with no record yet are updated. Use this only when the school really holds those parents' consent.</p>` : ''}</div>
       <div class="row" style="margin-bottom:10px"><input id="q" placeholder="Search name, class, phone…" value="${esc(q)}" style="max-width:320px"><span class="muted small">${S.contacts.length} shown</span></div>
-      ${S.contacts.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>Student</th><th>Class</th><th>Parent</th><th>Phone</th><th>Channel</th><th></th></tr></thead><tbody>
+      ${S.contacts.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>Student</th><th>Class</th><th>Parent</th><th>Phone</th><th>Channel</th><th>Consent</th><th></th></tr></thead><tbody>
         ${S.contacts.map((c) => `<tr data-id="${c.id}"><td>${esc(c.student_name)}<div class="small muted">${esc(c.admission_no)}</div></td><td>${esc(c.class_name)}</td><td>${esc(c.parent_name)}</td><td>+${esc(c.phone)}</td>
           <td><span class="pill ${c.channel === 'sms' ? 'sms' : 'wa'}">${c.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span>${c.opted_out ? ' <span class="pill failed">opted out</span>' : ''}</td>
+          <td><select class="consent-sel" aria-label="Consent">${consentOptions(c.consent_source || '')}</select>${c.consent_at ? `<div class="small muted">${esc(c.consent_at)}</div>` : ''}</td>
           <td style="text-align:right;white-space:nowrap"><button class="btn ghost" data-a="optout">${c.opted_out ? 'Opt in' : 'Opt out'}</button> <button class="btn danger" data-a="delcontact">Delete</button></td></tr>`).join('')}
         </tbody></table></div>` : `<div class="card empty">No parents found.</div>`}`;
     $('#addForm').addEventListener('submit', guard(async (e) => {
@@ -255,6 +272,7 @@
         <label>Default tone<select name="default_tone">${Object.entries(S.me.tones).map(([k, v]) => `<option value="${k}" ${school.default_tone === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
         <label>Default language<select name="default_language">${S.me.languages.map((l) => `<option ${school.default_language === l ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
         <label class="check" style="align-self:end"><input type="checkbox" name="auto_send_absence" ${school.auto_send_absence ? 'checked' : ''}> Send absence alerts automatically (no review)</label>
+        <label class="check" style="align-self:end"><input type="checkbox" name="require_consent" ${school.require_consent ? 'checked' : ''}> Only send to parents with consent recorded</label>
         <div><button class="btn" type="submit">Save settings</button></div></form></div>
       <div class="card"><h3>Class Register connection</h3>
         <p class="small muted" style="margin:6px 0 10px">Your Class Register calls this address when a pupil is marked absent (A) or late (L). A drafted alert then appears in Messages, or is sent straight away if auto-send is on.</p>
@@ -265,7 +283,7 @@
         <form id="staffForm" class="grid" style="margin-top:12px"><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label>${pwField('Temporary password', 'new-password')}<div style="align-self:end"><button class="btn" type="submit">Add teacher</button></div></form></div>` : `<div class="card muted">Only school admins can change settings.</div>`}`;
     $('#schoolForm')?.addEventListener('submit', guard(async (e) => {
       e.preventDefault();
-      const b = Object.fromEntries(new FormData(e.target)); b.auto_send_absence = !!b.auto_send_absence;
+      const b = Object.fromEntries(new FormData(e.target)); b.auto_send_absence = !!b.auto_send_absence; b.require_consent = !!b.require_consent;
       await api('/school', { method: 'PUT', body: b }); S.me = await api('/me'); toast('Settings saved'); renderShell();
     }));
     $('#staffForm')?.addEventListener('submit', guard(async (e) => {
@@ -303,11 +321,19 @@
     else if (a === 'send') await send();
     else if (a === 'retry') await send([+msgEl.dataset.id]);
     else if (a === 'discard') { await api('/messages/' + msgEl.dataset.id, { method: 'DELETE' }); await refreshCounts(); renderShell(); }
+    else if (a === 'bulkconsent') {
+      const cls = $('#bkClass').value, src = $('#bkSource').value, date = $('#bkDate').value;
+      const who = cls === '*' ? 'ALL parents who have no consent record yet' : `parents in ${cls || 'No class'} who have no consent record yet`;
+      if (!confirm(`Record consent for ${who}? Only do this if the school really holds their consent.`)) return;
+      const r = await api('/contacts/consent', { method: 'POST', body: { class_name: cls, source: src, date } });
+      toast(`Consent recorded for ${r.updated} parent${r.updated === 1 ? '' : 's'}`);
+      viewParents();
+    }
     else if (a === 'optout') { const c = S.contacts.find((x) => x.id === +rowEl.dataset.id); await api('/contacts/' + c.id, { method: 'PUT', body: { opted_out: c.opted_out ? 0 : 1 } }); viewParents($('#q').value); }
     else if (a === 'delcontact') { if (confirm('Delete this parent?')) { await api('/contacts/' + rowEl.dataset.id, { method: 'DELETE' }); S.classes = await api('/classes'); viewParents($('#q').value); } }
     else if (a === 'rotate') { if (confirm('The old key stops working immediately. Continue?')) { const r = await api('/school/rotate-key', { method: 'POST' }); S.me.school.api_key = r.api_key; $('#key').textContent = r.api_key; toast('New key generated. Update it in your Class Register.'); } }
     else if (a === 'template') {
-      const blob = new Blob(['student_name,class,parent_name,phone,admission_no,channel\nAdaeze Okafor,JSS 1A,Mrs Okafor,08031234567,SC/001,whatsapp\n'], { type: 'text/csv' });
+      const blob = new Blob(['student_name,class,parent_name,phone,admission_no,channel,consent\nAdaeze Okafor,JSS 1A,Mrs Okafor,08031234567,SC/001,whatsapp,yes\n'], { type: 'text/csv' });
       const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'parents-template.csv'; link.click();
     }
   }));
@@ -317,6 +343,13 @@
     $('.count', ta.closest('.msg')).textContent = counter(m, ta.value);
   });
   document.addEventListener('change', guard(async (e) => {
+    const cs = e.target.closest('select.consent-sel');
+    if (cs) {
+      await api('/contacts/' + cs.closest('tr').dataset.id, { method: 'PUT', body: { consent_source: cs.value } });
+      toast(cs.value ? 'Consent recorded' : 'Consent record cleared');
+      viewParents($('#q').value);
+      return;
+    }
     const ta = e.target.closest('.msg textarea'); if (!ta) return;
     const id = +ta.closest('.msg').dataset.id;
     await api('/messages/' + id, { method: 'PUT', body: { body: ta.value } });
