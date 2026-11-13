@@ -573,6 +573,54 @@ try {
   console.error('Password reset could not start:', e.message);
 }
 
+// ---------------------------------------------------------------- SMS delivery reports (Termii webhook)
+// Termii posts a report for every SMS. The address contains a secret part made from JWT_SECRET (nothing new to set on the server).
+const termiiToken = () => crypto.createHmac('sha256', process.env.JWT_SECRET || 'dev-only-secret').update('termii-delivery-reports-v1').digest('hex').slice(0, 32);
+const isOwnerAccount = (user) => { const first = db.prepare("SELECT MIN(id) AS id FROM users WHERE role='admin'").get(); return !!first && first.id === user.id; };
+const TERMII_FAILED = {
+  'message failed': "The message failed (poor network on the parent's side).",
+  'failed': "The message failed (poor network on the parent's side).",
+  'rejected': "Rejected: Do-Not-Disturb is active on the parent's number.",
+  'dnd active on phone number': "Do-Not-Disturb is active on the parent's number.",
+  'expired': "Expired: the parent's phone was off or out of signal for too long.",
+};
+
+app.get('/api/sms-webhook', requireAuth, requireAdmin, (req, res) => {
+  if (!isOwnerAccount(req.user)) return res.status(403).json({ error: 'Only the owner account can see this' });
+  res.json({ url: `${req.protocol}://${req.get('host')}/webhooks/termii/${termiiToken()}`, sms: ch.status().sms });
+});
+
+app.post('/webhooks/termii/:token', (req, res) => {
+  const given = Buffer.from(String(req.params.token || '')), want = Buffer.from(termiiToken());
+  if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) return res.sendStatus(403);
+  try {
+    // Information only (not enforced): does Termii's X-Termii-Signature match an HMAC SHA512 made with the API key?
+    const sig = req.get('x-termii-signature');
+    let signed = 'unsigned';
+    if (sig) {
+      const key = process.env.TERMII_API_KEY || '';
+      const mine = key ? crypto.createHmac('sha512', key).update(req.rawBody || '').digest('hex') : '';
+      signed = mine && mine.toLowerCase() === String(sig).toLowerCase() ? 'signature matches the API key' : 'signature present, does not match the API key';
+    }
+    const events = Array.isArray(req.body) ? req.body : [req.body || {}];
+    for (const ev of events) {
+      const id = String((ev && ev.message_id) || '').trim();
+      const status = String((ev && ev.status) || '').trim().toLowerCase();
+      if (!id || !status) continue;
+      const m = db.prepare('SELECT id, status FROM messages WHERE provider_id=?').get(id);
+      console.log(`[termii] message ${id}: ${status} (${m ? 'matched' : 'no matching message'}; ${signed})`);
+      if (!m) continue;
+      const rank = RANK[m.status] ?? 0;
+      if (status === 'delivered') {
+        if (rank < RANK.delivered) db.prepare("UPDATE messages SET status='delivered' WHERE id=?").run(m.id);
+      } else if (TERMII_FAILED[status]) {
+        if (rank < RANK.delivered && m.status !== 'failed') db.prepare("UPDATE messages SET status='failed', error=? WHERE id=?").run(TERMII_FAILED[status], m.id);
+      }
+    }
+  } catch (e) { console.error('Termii webhook error', e); }
+  res.sendStatus(200);
+});
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;

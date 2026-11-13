@@ -222,7 +222,7 @@
         <button class="btn" data-a="hist-csv">Download CSV</button></div>
       <div class="card"><div class="row"><h3>Summary for</h3><input type="month" id="histMonth" value="${esc(h.month)}" style="max-width:190px"></div>
         <div class="grid" style="margin-top:12px">${tile('Sent', t.sent)}${tile('Failed', t.failed)}${tile('Held back', t.skipped)}${tile('Drafts waiting', t.draft)}</div>
-        <p class="small muted" style="margin:10px 0 14px">${t.whatsapp} by WhatsApp, ${t.sms} by SMS. ${t.delivered} confirmed delivered (confirmation comes from WhatsApp only). Held back means the parent opted out or has no consent recorded.</p>
+        <p class="small muted" style="margin:10px 0 14px">${t.whatsapp} by WhatsApp, ${t.sms} by SMS. ${t.delivered} confirmed delivered (WhatsApp, and SMS once delivery reports are connected in Settings). Held back means the parent opted out or has no consent recorded.</p>
         <div class="grid">${histBreakdown('By type', h.sum.by_kind)}${histBreakdown('By class', h.sum.by_class)}</div></div>
       <div class="card"><div class="grid">
         <label>Search<input id="hq" value="${esc(f.q)}" placeholder="Parent, student, class or phone"></label>
@@ -301,12 +301,17 @@
     const { school, user, providers, origin } = S.me;
     const admin = user.role === 'admin';
     const users = admin ? await api('/users') : [];
+    const smsHook = admin ? await api('/sms-webhook').catch(() => null) : null;
     const pv = (v) => (v === true || v === 'live' ? '<span class="pill sent">live</span>' : '<span class="pill queued">' + (v === false ? 'templates only' : 'dry-run') + '</span>');
     $('#view').innerHTML = `
       <div class="head"><div><h1>Settings</h1></div></div>
       <div class="card"><h3>Connections</h3>
         <p style="margin:10px 0 4px">AI drafting ${pv(providers.ai)} &nbsp; SMS (Termii) ${pv(providers.sms)} &nbsp; WhatsApp ${pv(providers.whatsapp)}</p>
         <p class="small muted" style="margin:0">Dry-run means messages are logged on the server but not delivered. Add the API keys in the server environment to go live.</p></div>
+      ${smsHook ? `<div class="card"><h3>SMS delivery reports</h3>
+        <p class="small muted" style="margin:6px 0 10px">So that SMS messages change from Sent to Delivered (or Failed, with the reason), tell Termii where to send its delivery reports: in your Termii account, open the webhook settings and paste this address. Keep it private.</p>
+        <p><code id="smsHookUrl">${esc(smsHook.url)}</code></p>
+        <button class="btn ghost" data-a="copyhook">Copy address</button></div>` : ''}
       ${admin ? `<div class="card"><h3>School</h3><form id="schoolForm" class="grid" style="margin-top:12px">
         <label>School name<input name="name" value="${esc(school.name)}" required></label>
         <label>SMS sender ID (max 11 letters/numbers)<input name="sender_id" value="${esc(school.sender_id)}" maxlength="11"></label>
@@ -373,6 +378,10 @@
     }
     else if (a === 'hist-csv') {
       const link = document.createElement('a'); link.href = '/api/messages/export.csv?' + histQuery(S.hist.applied); link.download = ''; link.click();
+    }
+    else if (a === 'copyhook') {
+      try { await navigator.clipboard.writeText($('#smsHookUrl').textContent); toast('Address copied'); }
+      catch { toast('Select the address and copy it (Ctrl + C)', true); }
     }
     else if (a === 'bulkconsent') {
       const cls = $('#bkClass').value, src = $('#bkSource').value, date = $('#bkDate').value;
