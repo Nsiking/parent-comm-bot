@@ -83,6 +83,18 @@ if (!hasCol('schools', 'require_consent')) db.exec('ALTER TABLE schools ADD COLU
 // Scheduled sending ("send later"): the time is kept in UTC, like every other time in this database.
 if (!hasCol('messages', 'scheduled_at')) db.exec('ALTER TABLE messages ADD COLUMN scheduled_at TEXT');
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_scheduled ON messages(status, scheduled_at)');
+// A record of removed / moved teacher accounts (new table; nothing existing is changed).
+db.exec(`CREATE TABLE IF NOT EXISTS staff_actions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  school_id INTEGER,
+  actor_name TEXT NOT NULL,
+  actor_email TEXT NOT NULL,
+  action TEXT NOT NULL,
+  target_name TEXT NOT NULL,
+  target_email TEXT NOT NULL,
+  detail TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
 
 // Anything left "queued" by a crash/restart goes back to draft so nothing is silently lost.
 db.prepare("UPDATE messages SET status='draft' WHERE status='queued'").run();

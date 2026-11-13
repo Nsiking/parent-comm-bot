@@ -287,13 +287,29 @@
         <td>${s.failed}</td><td>${s.skipped}</td>
         <td class="small" style="white-space:nowrap">${s.last_message ? esc(String(s.last_message).slice(0, 16)) : '<span class="muted">No messages yet</span>'}</td>
         <td class="small">SMS ID: ${esc(s.sender_id)}<br>School Management: ${s.sm_connected ? 'connected' : 'not connected'}${s.require_consent ? '<br>Consent required' : ''}${s.auto_send_absence ? '<br>Auto-send absence alerts' : ''}</td></tr>`).join('');
+      S.fix = null;
+      const fixCard = `<div class="card"><h3>Fix a teacher account</h3>
+        <p class="small muted" style="margin:6px 0 10px">Type the exact email of a teacher account to move it to another school, or to delete it. Administrator accounts cannot be changed here.</p>
+        <div class="row"><input id="fixEmail" type="email" placeholder="teacher@example.com" style="max-width:340px"><button class="btn" data-a="fix-find">Find</button></div><div id="fixResult"></div></div>`;
+      const actionsCard = `<div class="card"><h3>Recent account changes</h3>${d.actions && d.actions.length ? `<table><tbody>${d.actions.map((x) => `<tr><td class="small" style="white-space:nowrap">${esc(String(x.at).slice(0, 16))}</td><td>${x.action === 'removed' ? 'Removed' : 'Moved'} <strong>${esc(x.target_name)}</strong> <span class="muted">${esc(x.target_email)}</span>${x.action === 'removed' ? ` from ${esc(x.school_name || 'a school')}` : ` ${esc(x.detail || '')}`}</td><td class="small muted">by ${esc(x.actor_name)}</td></tr>`).join('')}</tbody></table>` : '<p class="small muted" style="margin:6px 0 0">No changes yet.</p>'}</div>`;
       $('#view').innerHTML = `
         <div class="head"><div><h1>Platform</h1><p class="muted">How every school uses the bot. It shows counts only, never parents’ names, phone numbers or message text.</p></div>
           <label>Month<input type="month" id="platMonth" value="${esc(d.month)}" style="max-width:190px"></label></div>
         <div class="grid" style="margin-bottom:12px">${tile('Schools', t.schools)}${tile('Parents', t.parents)}${tile('Sent this month', t.sent)}${tile('Failed', t.failed)}${tile('Held back', t.skipped)}</div>
         <p class="small muted" style="margin:0 0 14px">${t.whatsapp} by WhatsApp, ${t.sms} by SMS, ${t.delivered} confirmed delivered. Right now ${t.drafts} drafts and ${t.scheduled} scheduled messages are waiting across all accounts. Sent, Failed and Held back are for the month chosen (Nigerian time).</p>
-        ${d.schools.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>School and administrators</th><th>Teachers</th><th>Parents</th><th>Sent</th><th>Failed</th><th>Held back</th><th>Last message</th><th>Settings</th></tr></thead><tbody>${body}</tbody></table></div>` : '<div class="card empty">No schools yet.</div>'}`;
+        ${d.schools.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>School and administrators</th><th>Teachers</th><th>Parents</th><th>Sent</th><th>Failed</th><th>Held back</th><th>Last message</th><th>Settings</th></tr></thead><tbody>${body}</tbody></table></div>` : '<div class="card empty">No schools yet.</div>'}${fixCard}${actionsCard}`;
     } catch (e) { toast(e.message, true); }
+  }
+
+  function renderFix() {
+    const box = $('#fixResult'), r = S.fix;
+    if (!box || !r) return;
+    if (!r.found) { box.innerHTML = '<p class="err" style="margin-top:10px">No account has that email.</p>'; return; }
+    const u = r.user;
+    if (!r.can_change) { box.innerHTML = `<p style="margin-top:12px"><strong>${esc(u.name)}</strong> <span class="muted">${esc(u.email)}</span> is an <strong>Administrator</strong> at ${esc(u.school_name)}. Administrator accounts cannot be changed here.</p>`; return; }
+    box.innerHTML = `<p style="margin-top:12px"><strong>${esc(u.name)}</strong> <span class="muted">${esc(u.email)}</span><br>Teacher at <strong>${esc(u.school_name)}</strong></p>
+      <div class="row"><label>Move to<select id="fixTo">${r.schools.filter((s) => s.id !== u.school_id).map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></label>
+        <button class="btn" data-a="fix-move" style="align-self:end">Move teacher</button><span class="spacer"></span><button class="btn danger" data-a="fix-remove" style="align-self:end">Delete account</button></div>`;
   }
 
   // ---------- consent record
@@ -379,7 +395,7 @@
         <p>Endpoint: <code>${esc(origin)}/api/hooks/absence</code></p>
         <p>API key: <code id="key">${esc(school.api_key)}</code> <button class="btn ghost" data-a="rotate">Generate new key</button></p></div>
       <div class="card"><h3>Staff accounts</h3>
-        <table><tbody>${users.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td><span class="pill">${roleLabel(u.role)}</span></td></tr>`).join('')}</tbody></table>
+        <table><tbody>${users.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td><span class="pill">${roleLabel(u.role)}</span></td><td style="text-align:right">${u.role === 'staff' ? `<button class="btn danger" data-a="rm-teacher" data-uid="${u.id}" data-name="${esc(u.name)}" data-email="${esc(u.email)}">Remove</button>` : ''}</td></tr>`).join('')}</tbody></table>
         <form id="staffForm" class="grid" style="margin-top:12px"><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label>${pwField('Temporary password', 'new-password')}<div style="align-self:end"><button class="btn" type="submit">Add teacher</button></div></form></div>` : `<div class="card muted">Only school admins can change settings.</div>`}`;
     $('#schoolForm')?.addEventListener('submit', guard(async (e) => {
       e.preventDefault();
@@ -435,6 +451,29 @@
     }
     else if (a === 'hist-csv') {
       const link = document.createElement('a'); link.href = '/api/messages/export.csv?' + histQuery(S.hist.applied); link.download = ''; link.click();
+    }
+    else if (a === 'rm-teacher') {
+      if (!confirm(`Remove ${el.dataset.name} (${el.dataset.email})? They will no longer be able to sign in. Parents and messages are not affected.`)) return;
+      await api('/users/' + el.dataset.uid, { method: 'DELETE' });
+      toast('Teacher removed'); viewSettings();
+    }
+    else if (a === 'fix-find') {
+      const mail = $('#fixEmail').value.trim();
+      if (!mail) return toast('Type the email address of the account', true);
+      S.fix = await api('/platform/teacher?email=' + encodeURIComponent(mail)); renderFix();
+    }
+    else if (a === 'fix-move') {
+      const u = S.fix.user, sel = S.fix.schools.find((s) => String(s.id) === String($('#fixTo').value));
+      if (!sel) return toast('Choose the school to move the teacher to', true);
+      if (!confirm(`Move ${u.name} (${u.email}) from ${u.school_name} to ${sel.name}? Their password stays the same.`)) return;
+      await api('/platform/teacher/move', { method: 'POST', body: { id: u.id, school_id: sel.id } });
+      toast(`${u.name} moved to ${sel.name}`); await viewPlatform();
+    }
+    else if (a === 'fix-remove') {
+      const u = S.fix.user;
+      if (!confirm(`Delete the account of ${u.name} (${u.email}) from ${u.school_name}? This cannot be undone. Parents and messages are not affected.`)) return;
+      await api('/platform/teacher/remove', { method: 'POST', body: { id: u.id } });
+      toast(`${u.name} deleted`); await viewPlatform();
     }
     else if (a === 'copyhook') {
       try { await navigator.clipboard.writeText($('#smsHookUrl').textContent); toast('Address copied'); }

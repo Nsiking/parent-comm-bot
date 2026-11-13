@@ -708,12 +708,79 @@ app.get('/api/platform/overview', requireAuth, requireAdmin, (req, res) => {
   for (const w of waiting) { const r = idx.get(w.school_id); if (r) r[w.status === 'draft' ? 'drafts' : 'scheduled'] += w.n; }
   rows.sort((a, b) => (a.is_yours ? 1 : 0) - (b.is_yours ? 1 : 0) || b.sent - a.sent || b.parents - a.parents || a.name.localeCompare(b.name));
   const sum = (k) => rows.reduce((n, r) => n + r[k], 0);
+  const actions = db.prepare(`SELECT a.id, datetime(a.created_at, '+1 hour') AS at, a.action, a.actor_name, a.target_name, a.target_email, a.detail, s.name AS school_name
+    FROM staff_actions a LEFT JOIN schools s ON s.id = a.school_id ORDER BY a.id DESC LIMIT 10`).all();
   res.json({
     month,
     totals: { schools: rows.filter((r) => !r.is_yours).length, parents: sum('parents'), teachers: sum('teachers'), admins: rows.reduce((n, r) => n + r.admins.length, 0),
       sent: sum('sent'), delivered: sum('delivered'), failed: sum('failed'), skipped: sum('skipped'), whatsapp: sum('whatsapp'), sms: sum('sms'), drafts: sum('drafts'), scheduled: sum('scheduled') },
     schools: rows,
+    actions,
   });
+});
+
+// ---------------------------------------------------------------- removing or moving TEACHER accounts
+// Only teacher accounts. Administrators and the owner can never be removed or moved here. Every change is recorded.
+function recordStaffAction(actor, action, target, detail) {
+  db.prepare('INSERT INTO staff_actions(school_id, actor_name, actor_email, action, target_name, target_email, detail) VALUES (?,?,?,?,?,?,?)')
+    .run(target.school_id, actor.name, actor.email, action, target.name, target.email, detail || null);
+}
+const ownerOnly = (req, res, next) => (isOwnerAccount(req.user) ? next() : res.status(403).json({ error: 'Only the owner account can do this' }));
+
+// Saves a change in one step; if anything fails, nothing is changed and the person sees a clear message
+// (instead of the misleading "Please sign in" that an error inside a route would otherwise cause).
+function saveStaffChange(res, fn) {
+  try { db.transaction(fn)(); return true; }
+  catch (e) { console.error('Staff change failed:', e.message); res.status(500).json({ error: 'The change could not be saved, so nothing was changed.' }); return false; }
+}
+
+// A school administrator removes a teacher of THEIR OWN school.
+app.delete('/api/users/:id', requireAuth, requireAdmin, (req, res) => {
+  const target = db.prepare('SELECT * FROM users WHERE id = ? AND school_id = ?').get(Number(req.params.id) || 0, req.user.school_id);
+  if (!target) return res.status(404).json({ error: 'That account was not found in your school' });
+  if (target.id === req.user.id) return res.status(400).json({ error: 'You cannot remove your own account' });
+  if (target.role !== 'staff') return res.status(400).json({ error: 'Administrator accounts cannot be removed here' });
+  if (!saveStaffChange(res, () => {
+    db.prepare("DELETE FROM users WHERE id = ? AND role = 'staff'").run(target.id);
+    recordStaffAction(req.user, 'removed', target, null);
+  })) return;
+  res.json({ ok: true });
+});
+
+// The owner looks up an account by its exact email.
+app.get('/api/platform/teacher', requireAuth, requireAdmin, ownerOnly, (req, res) => {
+  const email = String(req.query.email || '').trim().toLowerCase();
+  if (!email) return res.status(400).json({ error: 'Type the email address of the account' });
+  const u = db.prepare('SELECT u.id, u.name, u.email, u.role, u.school_id, s.name AS school_name FROM users u JOIN schools s ON s.id = u.school_id WHERE lower(u.email) = ?').get(email);
+  const schools = db.prepare('SELECT id, name FROM schools ORDER BY name').all();
+  if (!u) return res.json({ found: false, schools });
+  res.json({ found: true, user: u, can_change: u.role === 'staff', schools });
+});
+
+app.post('/api/platform/teacher/move', requireAuth, requireAdmin, ownerOnly, (req, res) => {
+  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(Number((req.body || {}).id) || 0);
+  if (!target) return res.status(404).json({ error: 'That account was not found' });
+  if (target.role !== 'staff') return res.status(400).json({ error: 'Only teacher accounts can be moved' });
+  const to = db.prepare('SELECT * FROM schools WHERE id = ?').get(Number((req.body || {}).school_id) || 0);
+  if (!to) return res.status(400).json({ error: 'Choose the school to move the teacher to' });
+  if (to.id === target.school_id) return res.status(400).json({ error: 'The teacher is already in that school' });
+  const from = db.prepare('SELECT name FROM schools WHERE id = ?').get(target.school_id);
+  if (!saveStaffChange(res, () => {
+    db.prepare("UPDATE users SET school_id = ? WHERE id = ? AND role = 'staff'").run(to.id, target.id);
+    recordStaffAction(req.user, 'moved', target, `from ${from.name} to ${to.name}`);
+  })) return;
+  res.json({ ok: true, to: to.name });
+});
+
+app.post('/api/platform/teacher/remove', requireAuth, requireAdmin, ownerOnly, (req, res) => {
+  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(Number((req.body || {}).id) || 0);
+  if (!target) return res.status(404).json({ error: 'That account was not found' });
+  if (target.role !== 'staff') return res.status(400).json({ error: 'Only teacher accounts can be deleted here' });
+  if (!saveStaffChange(res, () => {
+    db.prepare("DELETE FROM users WHERE id = ? AND role = 'staff'").run(target.id);
+    recordStaffAction(req.user, 'removed', target, null);
+  })) return;
+  res.json({ ok: true });
 });
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
