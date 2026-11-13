@@ -53,6 +53,7 @@
   // ---------- shell
   async function boot() {
     try { S.me = await api('/me'); } catch { return renderAuth(); }
+    S.view = S.me.owner ? 'platform' : 'compose';
     S.classes = await api('/classes');
     await refreshCounts();
     renderShell();
@@ -63,17 +64,18 @@
   }
   const roleLabel = (r) => (r === 'admin' ? 'Administrator' : 'Teacher');
   const NAV = [['compose', 'Compose'], ['messages', 'Messages'], ['history', 'History'], ['parents', 'Parents'], ['settings', 'Settings']];
+  const navItems = () => (S.me && S.me.owner ? [['platform', 'Platform'], ...NAV] : NAV);
   function renderShell() {
     const m = S.me;
     root.innerHTML = `<div class="shell"><nav class="rail">
       <div class="brand">${esc(m.school.name)}<small>Parent Communication Bot</small></div>
-      ${NAV.map(([id, label]) => `<button class="nav ${S.view === id ? 'active' : ''}" data-a="nav" data-v="${id}">${label}${id === 'messages' && S.counts.draft ? `<span class="badge">${S.counts.draft}</span>` : ''}</button>`).join('')}
+      ${navItems().map(([id, label]) => `<button class="nav ${S.view === id ? 'active' : ''}" data-a="nav" data-v="${id}">${label}${id === 'messages' && S.counts.draft ? `<span class="badge">${S.counts.draft}</span>` : ''}</button>`).join('')}
       <div class="who">${esc(m.user.name)}<br><span style="color:#cfe0da;font-size:12px">${roleLabel(m.user.role)}</span><br><button class="link" style="color:#9db8b0" data-a="logout">Sign out</button></div>
     </nav><main id="view"></main></div>`;
     renderView();
   }
   function renderView() {
-    ({ compose: viewCompose, messages: viewMessages, history: viewHistory, parents: viewParents, settings: viewSettings })[S.view]();
+    ({ platform: viewPlatform, compose: viewCompose, messages: viewMessages, history: viewHistory, parents: viewParents, settings: viewSettings })[S.view]();
   }
   const setView = (v) => { S.view = v; clearInterval(S.poll); renderShell(); };
 
@@ -267,6 +269,33 @@
     } catch (e) { toast(e.message, true); }
   }
 
+  // ---------- platform console (owner account only): counts, never content
+  async function viewPlatform() {
+    try {
+      S.plat = S.plat || { month: '' };
+      const d = await api('/platform/overview' + (S.plat.month ? '?month=' + S.plat.month : ''));
+      S.plat.month = d.month;
+      const t = d.totals;
+      const tile = (label, n) => `<div class="card" style="margin:0"><div class="small muted">${label}</div><div style="font:700 28px var(--head)">${n}</div></div>`;
+      const body = d.schools.map((s) => `<tr>
+        <td><strong>${esc(s.name)}</strong>${s.is_yours ? ' <span class="pill">Your account</span>' : ''}
+          <div class="small muted">Joined ${esc(String(s.created_at).slice(0, 10))}</div>
+          <div class="small">${s.admins.length ? s.admins.map((x) => `${esc(x.name)} <span class="muted">${esc(x.email)}</span>`).join('<br>') : '<span class="muted">No administrator</span>'}</div></td>
+        <td>${s.teachers}</td>
+        <td>${s.parents}<div class="small muted">${s.consented} with consent</div></td>
+        <td>${s.sent}<div class="small muted">${s.whatsapp} WhatsApp · ${s.sms} SMS</div></td>
+        <td>${s.failed}</td><td>${s.skipped}</td>
+        <td class="small" style="white-space:nowrap">${s.last_message ? esc(String(s.last_message).slice(0, 16)) : '<span class="muted">No messages yet</span>'}</td>
+        <td class="small">SMS ID: ${esc(s.sender_id)}<br>School Management: ${s.sm_connected ? 'connected' : 'not connected'}${s.require_consent ? '<br>Consent required' : ''}${s.auto_send_absence ? '<br>Auto-send absence alerts' : ''}</td></tr>`).join('');
+      $('#view').innerHTML = `
+        <div class="head"><div><h1>Platform</h1><p class="muted">How every school uses the bot. It shows counts only, never parents’ names, phone numbers or message text.</p></div>
+          <label>Month<input type="month" id="platMonth" value="${esc(d.month)}" style="max-width:190px"></label></div>
+        <div class="grid" style="margin-bottom:12px">${tile('Schools', t.schools)}${tile('Parents', t.parents)}${tile('Sent this month', t.sent)}${tile('Failed', t.failed)}${tile('Held back', t.skipped)}</div>
+        <p class="small muted" style="margin:0 0 14px">${t.whatsapp} by WhatsApp, ${t.sms} by SMS, ${t.delivered} confirmed delivered. Right now ${t.drafts} drafts and ${t.scheduled} scheduled messages are waiting across all accounts. Sent, Failed and Held back are for the month chosen (Nigerian time).</p>
+        ${d.schools.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>School and administrators</th><th>Teachers</th><th>Parents</th><th>Sent</th><th>Failed</th><th>Held back</th><th>Last message</th><th>Settings</th></tr></thead><tbody>${body}</tbody></table></div>` : '<div class="card empty">No schools yet.</div>'}`;
+    } catch (e) { toast(e.message, true); }
+  }
+
   // ---------- consent record
   const reach = (c) => (S.me.school.require_consent ? c.consented : c.reachable);
   const CONSENT_OPTS = [['admission_form', 'Admission form'], ['verbal', 'Verbal'], ['other', 'Other']];
@@ -433,6 +462,7 @@
     $('.count', ta.closest('.msg')).textContent = counter(m, ta.value);
   });
   document.addEventListener('change', guard(async (e) => {
+    if (e.target.closest('#platMonth')) { S.plat.month = e.target.value; await viewPlatform(); return; }
     if (e.target.closest('#histMonth')) {
       const v = e.target.value;
       if (/^\d{4}-\d{2}$/.test(v)) { S.hist.month = v; S.hist.sum = await api('/messages/summary?month=' + v); renderHistory(); }

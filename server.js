@@ -75,6 +75,7 @@ app.get('/api/me', requireAuth, (req, res) => {
   if (req.user.role !== 'admin') delete school.api_key;
   res.json({
     user: req.user,
+    owner: isOwnerAccount(req.user),
     school,
     kinds: ai.KINDS,
     tones: ai.TONES,
@@ -671,6 +672,49 @@ const scheduleTimer = setInterval(runScheduled, Number(process.env.SCHEDULE_CHEC
 if (scheduleTimer.unref) scheduleTimer.unref();
 const firstScheduleCheck = setTimeout(runScheduled, 5000);
 if (firstScheduleCheck.unref) firstScheduleCheck.unref();
+
+// ---------------------------------------------------------------- platform console (owner account only): counts, never content
+// Shows how every school is using the bot. It returns NUMBERS ONLY: no parent names, phone numbers or message text.
+app.get('/api/platform/overview', requireAuth, requireAdmin, (req, res) => {
+  if (!isOwnerAccount(req.user)) return res.status(403).json({ error: 'Only the owner account can see this' });
+  const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(String(req.query.month || '')) ? String(req.query.month) : new Date(Date.now() + 3600e3).toISOString().slice(0, 7);
+  const hasSm = db.prepare('PRAGMA table_info(schools)').all().some((c) => c.name === 'sm_school_id');
+  const schools = db.prepare(`SELECT id, name, created_at, sender_id, require_consent, auto_send_absence,
+    ${hasSm ? '(sm_school_id IS NOT NULL AND sm_key IS NOT NULL)' : '0'} AS sm_connected FROM schools ORDER BY id`).all();
+  const users = db.prepare('SELECT school_id, role, name, email FROM users ORDER BY id').all();
+  const contacts = db.prepare('SELECT school_id, COUNT(*) AS n, SUM(consent_at IS NOT NULL) AS consented, SUM(opted_out) AS opted_out FROM contacts GROUP BY school_id').all();
+  const inMonth = db.prepare(`SELECT m.school_id AS school_id, m.status AS status, m.channel AS channel, COUNT(*) AS n FROM messages m
+    WHERE strftime('%Y-%m', ${WHEN_SQL}) = ? GROUP BY m.school_id, m.status, m.channel`).all(month);
+  const last = db.prepare(`SELECT m.school_id AS school_id, datetime(MAX(COALESCE(m.sent_at, m.created_at)), '+1 hour') AS last FROM messages m GROUP BY m.school_id`).all();
+  const waiting = db.prepare("SELECT school_id, status, COUNT(*) AS n FROM messages WHERE status IN ('draft','scheduled') GROUP BY school_id, status").all();
+
+  const rows = schools.map((s) => ({
+    id: s.id, name: s.name, created_at: s.created_at, is_yours: s.id === req.user.school_id,
+    admins: users.filter((u) => u.school_id === s.id && u.role === 'admin').map((u) => ({ name: u.name, email: u.email })),
+    teachers: users.filter((u) => u.school_id === s.id && u.role !== 'admin').length,
+    parents: 0, consented: 0, opted_out: 0, sent: 0, delivered: 0, failed: 0, skipped: 0, whatsapp: 0, sms: 0, drafts: 0, scheduled: 0,
+    last_message: null, sender_id: s.sender_id, sm_connected: !!s.sm_connected, require_consent: !!s.require_consent, auto_send_absence: !!s.auto_send_absence,
+  }));
+  const idx = new Map(rows.map((r) => [r.id, r]));
+  for (const c of contacts) { const r = idx.get(c.school_id); if (r) { r.parents = c.n; r.consented = c.consented || 0; r.opted_out = c.opted_out || 0; } }
+  for (const m of inMonth) {
+    const r = idx.get(m.school_id); if (!r) continue;
+    if (['queued', 'sent', 'delivered', 'read'].includes(m.status)) { r.sent += m.n; r[m.channel === 'sms' ? 'sms' : 'whatsapp'] += m.n; }
+    if (m.status === 'delivered' || m.status === 'read') r.delivered += m.n;
+    if (m.status === 'failed') r.failed += m.n;
+    if (m.status === 'skipped') r.skipped += m.n;
+  }
+  for (const l of last) { const r = idx.get(l.school_id); if (r) r.last_message = l.last; }
+  for (const w of waiting) { const r = idx.get(w.school_id); if (r) r[w.status === 'draft' ? 'drafts' : 'scheduled'] += w.n; }
+  rows.sort((a, b) => (a.is_yours ? 1 : 0) - (b.is_yours ? 1 : 0) || b.sent - a.sent || b.parents - a.parents || a.name.localeCompare(b.name));
+  const sum = (k) => rows.reduce((n, r) => n + r[k], 0);
+  res.json({
+    month,
+    totals: { schools: rows.filter((r) => !r.is_yours).length, parents: sum('parents'), teachers: sum('teachers'), admins: rows.reduce((n, r) => n + r.admins.length, 0),
+      sent: sum('sent'), delivered: sum('delivered'), failed: sum('failed'), skipped: sum('skipped'), whatsapp: sum('whatsapp'), sms: sum('sms'), drafts: sum('drafts'), scheduled: sum('scheduled') },
+    schools: rows,
+  });
+});
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
