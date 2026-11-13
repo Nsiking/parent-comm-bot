@@ -61,13 +61,14 @@
     const d = await api('/messages?group=' + S.group);
     S.msgs = d.messages; S.counts = d.counts;
   }
+  const roleLabel = (r) => (r === 'admin' ? 'Administrator' : 'Teacher');
   const NAV = [['compose', 'Compose'], ['messages', 'Messages'], ['history', 'History'], ['parents', 'Parents'], ['settings', 'Settings']];
   function renderShell() {
     const m = S.me;
     root.innerHTML = `<div class="shell"><nav class="rail">
       <div class="brand">${esc(m.school.name)}<small>Parent Communication Bot</small></div>
       ${NAV.map(([id, label]) => `<button class="nav ${S.view === id ? 'active' : ''}" data-a="nav" data-v="${id}">${label}${id === 'messages' && S.counts.draft ? `<span class="badge">${S.counts.draft}</span>` : ''}</button>`).join('')}
-      <div class="who">${esc(m.user.name)}<br><button class="link" style="color:#9db8b0" data-a="logout">Sign out</button></div>
+      <div class="who">${esc(m.user.name)}<br><span style="color:#cfe0da;font-size:12px">${roleLabel(m.user.role)}</span><br><button class="link" style="color:#9db8b0" data-a="logout">Sign out</button></div>
     </nav><main id="view"></main></div>`;
     renderView();
   }
@@ -349,7 +350,7 @@
         <p>Endpoint: <code>${esc(origin)}/api/hooks/absence</code></p>
         <p>API key: <code id="key">${esc(school.api_key)}</code> <button class="btn ghost" data-a="rotate">Generate new key</button></p></div>
       <div class="card"><h3>Staff accounts</h3>
-        <table><tbody>${users.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td><span class="pill">${u.role}</span></td></tr>`).join('')}</tbody></table>
+        <table><tbody>${users.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td><span class="pill">${roleLabel(u.role)}</span></td></tr>`).join('')}</tbody></table>
         <form id="staffForm" class="grid" style="margin-top:12px"><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label>${pwField('Temporary password', 'new-password')}<div style="align-self:end"><button class="btn" type="submit">Add teacher</button></div></form></div>` : `<div class="card muted">Only school admins can change settings.</div>`}`;
     $('#schoolForm')?.addEventListener('submit', guard(async (e) => {
       e.preventDefault();
