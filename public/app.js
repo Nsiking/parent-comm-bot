@@ -61,7 +61,7 @@
     const d = await api('/messages?group=' + S.group);
     S.msgs = d.messages; S.counts = d.counts;
   }
-  const NAV = [['compose', 'Compose'], ['messages', 'Messages'], ['parents', 'Parents'], ['settings', 'Settings']];
+  const NAV = [['compose', 'Compose'], ['messages', 'Messages'], ['history', 'History'], ['parents', 'Parents'], ['settings', 'Settings']];
   function renderShell() {
     const m = S.me;
     root.innerHTML = `<div class="shell"><nav class="rail">
@@ -72,7 +72,7 @@
     renderView();
   }
   function renderView() {
-    ({ compose: viewCompose, messages: viewMessages, parents: viewParents, settings: viewSettings })[S.view]();
+    ({ compose: viewCompose, messages: viewMessages, history: viewHistory, parents: viewParents, settings: viewSettings })[S.view]();
   }
   const setView = (v) => { S.view = v; clearInterval(S.poll); renderShell(); };
 
@@ -201,6 +201,48 @@
     head.forEach((h, i) => { const k = h.trim().toLowerCase().replace(/[\s-]+/g, '_'); for (const [f, al] of Object.entries(ALIAS)) if (al.includes(k) && idx[f] === undefined) idx[f] = i; });
     return body.map((r) => Object.fromEntries(Object.entries(idx).map(([f, i]) => [f, (r[i] || '').trim()])));
   }
+  // ---------- history, export and monthly summary
+  const STATUS_LABEL = { sent: 'Sent', delivered: 'Delivered', read: 'Read', queued: 'Sending', failed: 'Failed', skipped: 'Held back', draft: 'Draft' };
+  const prettyPhone = (p) => (/^234\d{10}$/.test(p) ? `+234 ${p.slice(3, 6)} ${p.slice(6, 9)} ${p.slice(9)}` : '+' + p);
+  const histQuery = (f, extra = {}) => new URLSearchParams(Object.entries({ q: f.q, status: f.status, kind: f.kind, from: f.from, to: f.to, ...extra }).filter(([, v]) => v !== '' && v != null)).toString();
+  const histRows = (rows) => rows.map((m) => `<tr><td class="small" style="white-space:nowrap">${esc(String(m.at).slice(0, 16))}</td>
+      <td>${esc(m.parent_name || 'Parent')}<div class="small muted">${esc(m.student_name || '')}${m.class_name ? ', ' + esc(m.class_name) : ''}</div></td>
+      <td class="small">${esc(S.me.kinds[m.kind] || '')}</td>
+      <td><span class="pill ${m.channel === 'sms' ? 'sms' : 'wa'}">${m.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span></td>
+      <td><span class="pill ${m.status}">${STATUS_LABEL[m.status] || esc(m.status)}</span></td>
+      <td><div class="small" title="${esc(m.body)}">${esc(m.body.length > 120 ? m.body.slice(0, 120) + '…' : m.body)}</div>${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}</td></tr>`).join('');
+  const histBreakdown = (title, list) => `<div><h3>${title}</h3>${list.length ? `<div class="tablewrap"><table><thead><tr><th></th><th>Sent</th><th>Failed</th><th>Held back</th><th>Drafts</th></tr></thead><tbody>
+      ${list.map((e) => `<tr><td>${esc(e.label)}</td><td>${e.sent}</td><td>${e.failed}</td><td>${e.skipped}</td><td>${e.draft}</td></tr>`).join('')}</tbody></table></div>` : '<p class="small muted">No messages in this month.</p>'}</div>`;
+  function renderHistory() {
+    const h = S.hist, f = h.applied, t = h.sum.totals;
+    const sel = (cur, v, l) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`;
+    const tile = (label, n) => `<div class="card" style="margin:0"><div class="small muted">${label}</div><div style="font:700 28px var(--head)">${n}</div></div>`;
+    $('#view').innerHTML = `
+      <div class="head"><div><h1>History</h1><p class="muted">Every message the bot has drafted, sent or held back. Times are Nigerian time.</p></div>
+        <button class="btn" data-a="hist-csv">Download CSV</button></div>
+      <div class="card"><div class="row"><h3>Summary for</h3><input type="month" id="histMonth" value="${esc(h.month)}" style="max-width:190px"></div>
+        <div class="grid" style="margin-top:12px">${tile('Sent', t.sent)}${tile('Failed', t.failed)}${tile('Held back', t.skipped)}${tile('Drafts waiting', t.draft)}</div>
+        <p class="small muted" style="margin:10px 0 14px">${t.whatsapp} by WhatsApp, ${t.sms} by SMS. ${t.delivered} confirmed delivered (confirmation comes from WhatsApp only). Held back means the parent opted out or has no consent recorded.</p>
+        <div class="grid">${histBreakdown('By type', h.sum.by_kind)}${histBreakdown('By class', h.sum.by_class)}</div></div>
+      <div class="card"><div class="grid">
+        <label>Search<input id="hq" value="${esc(f.q)}" placeholder="Parent, student, class or phone"></label>
+        <label>Status<select id="hstatus">${sel(f.status, '', 'All')}${sel(f.status, 'sent', 'Sent')}${sel(f.status, 'failed', 'Failed')}${sel(f.status, 'skipped', 'Held back')}${sel(f.status, 'draft', 'Drafts')}</select></label>
+        <label>Type<select id="hkind">${sel(f.kind, '', 'All types')}${Object.entries(S.me.kinds).map(([k, v]) => sel(f.kind, k, esc(v))).join('')}</select></label>
+        <label>From<input type="date" id="hfrom" value="${esc(f.from)}"></label><label>To<input type="date" id="hto" value="${esc(f.to)}"></label>
+        <div style="align-self:end"><button class="btn" data-a="hist-apply">Show</button></div></div></div>
+      <p class="small muted">${h.total} message${h.total === 1 ? '' : 's'} match${h.total === 1 ? 'es' : ''}.</p>
+      ${h.rows.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>When</th><th>Parent</th><th>Type</th><th>Channel</th><th>Status</th><th>Message</th></tr></thead><tbody>${histRows(h.rows)}</tbody></table></div>
+        ${h.rows.length < h.total ? '<button class="btn ghost" data-a="hist-more">Show more</button>' : ''}` : '<div class="card empty">No messages match.</div>'}`;
+  }
+  async function viewHistory() {
+    try {
+      const h = (S.hist = S.hist || { month: todayLocal().slice(0, 7), applied: { q: '', status: '', kind: '', from: '', to: '' }, rows: [], total: 0, sum: null });
+      const [sum, list] = await Promise.all([api('/messages/summary?month=' + h.month), api('/messages/history?' + histQuery(h.applied, { limit: 100, offset: 0 }))]);
+      h.sum = sum; h.rows = list.rows; h.total = list.total;
+      renderHistory();
+    } catch (e) { toast(e.message, true); }
+  }
+
   // ---------- consent record
   const reach = (c) => (S.me.school.require_consent ? c.consented : c.reachable);
   const CONSENT_OPTS = [['admission_form', 'Admission form'], ['verbal', 'Verbal'], ['other', 'Other']];
@@ -321,6 +363,17 @@
     else if (a === 'send') await send();
     else if (a === 'retry') await send([+msgEl.dataset.id]);
     else if (a === 'discard') { await api('/messages/' + msgEl.dataset.id, { method: 'DELETE' }); await refreshCounts(); renderShell(); }
+    else if (a === 'hist-apply') {
+      S.hist.applied = { q: $('#hq').value.trim(), status: $('#hstatus').value, kind: $('#hkind').value, from: $('#hfrom').value, to: $('#hto').value };
+      await viewHistory();
+    }
+    else if (a === 'hist-more') {
+      const more = await api('/messages/history?' + histQuery(S.hist.applied, { limit: 100, offset: S.hist.rows.length }));
+      S.hist.rows = S.hist.rows.concat(more.rows); S.hist.total = more.total; renderHistory();
+    }
+    else if (a === 'hist-csv') {
+      const link = document.createElement('a'); link.href = '/api/messages/export.csv?' + histQuery(S.hist.applied); link.download = ''; link.click();
+    }
     else if (a === 'bulkconsent') {
       const cls = $('#bkClass').value, src = $('#bkSource').value, date = $('#bkDate').value;
       const who = cls === '*' ? 'ALL parents who have no consent record yet' : `parents in ${cls || 'No class'} who have no consent record yet`;
@@ -343,6 +396,11 @@
     $('.count', ta.closest('.msg')).textContent = counter(m, ta.value);
   });
   document.addEventListener('change', guard(async (e) => {
+    if (e.target.closest('#histMonth')) {
+      const v = e.target.value;
+      if (/^\d{4}-\d{2}$/.test(v)) { S.hist.month = v; S.hist.sum = await api('/messages/summary?month=' + v); renderHistory(); }
+      return;
+    }
     const cs = e.target.closest('select.consent-sel');
     if (cs) {
       await api('/contacts/' + cs.closest('tr').dataset.id, { method: 'PUT', body: { consent_source: cs.value } });

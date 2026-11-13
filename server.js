@@ -379,6 +379,90 @@ app.post('/api/messages/send', requireAuth, (req, res) => {
   res.json(queueAndSend(req.user.school_id, ids));
 });
 
+// ---------------------------------------------------------------- history, CSV export and monthly summary
+// The database stores UTC; history shows Nigerian time (WAT, UTC+1), like the School Management connection does.
+const WHEN_SQL = "datetime(COALESCE(m.sent_at, m.created_at), '+1 hour')";
+const KIND_SQL = "CASE WHEN b.kind IS NOT NULL THEN b.kind WHEN m.dedupe_key LIKE 'absence:%' THEN 'absence' WHEN m.dedupe_key LIKE 'late:%' THEN 'late' ELSE NULL END";
+const HISTORY_FROM = 'FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id LEFT JOIN batches b ON b.id=m.batch_id';
+const HISTORY_STATUS = { sent: ['queued', 'sent', 'delivered', 'read'], failed: ['failed'], skipped: ['skipped'], draft: ['draft'] };
+
+function historyFilter(schoolId, query) {
+  const where = ['m.school_id=?'];
+  const params = [schoolId];
+  const text = String(query.q || '').trim().toLowerCase();
+  if (text) {
+    const like = `%${text}%`;
+    const phone = ch.normalizePhone(text);
+    where.push(`(lower(c.parent_name) LIKE ? OR lower(c.student_name) LIKE ? OR lower(c.class_name) LIKE ? OR m.phone LIKE ?${phone ? ' OR m.phone = ?' : ''})`);
+    params.push(like, like, like, like);
+    if (phone) params.push(phone);
+  }
+  const st = HISTORY_STATUS[query.status];
+  if (st) { where.push(`m.status IN (${placeholders(st.length)})`); params.push(...st); }
+  if (ai.KINDS[query.kind]) { where.push(`(${KIND_SQL}) = ?`); params.push(query.kind); }
+  const day = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? String(d) : null);
+  if (day(query.from)) { where.push(`date(${WHEN_SQL}) >= ?`); params.push(day(query.from)); }
+  if (day(query.to)) { where.push(`date(${WHEN_SQL}) <= ?`); params.push(day(query.to)); }
+  return { where: where.join(' AND '), params };
+}
+
+app.get('/api/messages/history', requireAuth, (req, res) => {
+  const f = historyFilter(req.user.school_id, req.query);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+  const total = db.prepare(`SELECT COUNT(*) AS n ${HISTORY_FROM} WHERE ${f.where}`).get(...f.params).n;
+  const rows = db.prepare(`SELECT m.id, ${WHEN_SQL} AS at, m.status, m.channel, m.phone, m.body, m.error, c.parent_name, c.student_name, c.class_name, ${KIND_SQL} AS kind
+    ${HISTORY_FROM} WHERE ${f.where} ORDER BY COALESCE(m.sent_at, m.created_at) DESC, m.id DESC LIMIT ? OFFSET ?`).all(...f.params, limit, offset);
+  res.json({ total, rows });
+});
+
+// A spreadsheet can run text that starts with = + - @ as a formula, so such text is stored with a leading apostrophe.
+const csvCell = (v) => {
+  let t = v == null ? '' : String(v);
+  if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;
+  return /[",\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+};
+const prettyPhone = (p) => {
+  const d = String(p || '');
+  return /^234\d{10}$/.test(d) ? `+234 ${d.slice(3, 6)} ${d.slice(6, 9)} ${d.slice(9)}` : (d ? '+' + d : '');
+};
+
+app.get('/api/messages/export.csv', requireAuth, (req, res) => {
+  const f = historyFilter(req.user.school_id, req.query);
+  const rows = db.prepare(`SELECT ${WHEN_SQL} AS at, m.status, m.channel, m.phone, m.body, m.error, c.parent_name, c.student_name, c.class_name, ${KIND_SQL} AS kind
+    ${HISTORY_FROM} WHERE ${f.where} ORDER BY COALESCE(m.sent_at, m.created_at) DESC, m.id DESC LIMIT 20000`).all(...f.params);
+  const head = ['Date', 'Time', 'Class', 'Student', 'Parent', 'Phone', 'Type', 'Channel', 'Status', 'Reason', 'Message'];
+  const lines = [head.join(',')];
+  for (const r of rows) {
+    const cells = [String(r.at).slice(0, 10), String(r.at).slice(11, 16), r.class_name, r.student_name, r.parent_name].map(csvCell);
+    cells.push(prettyPhone(r.phone));
+    cells.push(...[ai.KINDS[r.kind] || '', r.channel === 'sms' ? 'SMS' : 'WhatsApp', r.status, r.error, r.body].map(csvCell));
+    lines.push(cells.join(','));
+  }
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="parent-bot-messages-${todayStr()}.csv"`);
+  res.send('\ufeff' + lines.join('\r\n') + '\r\n');
+});
+
+app.get('/api/messages/summary', requireAuth, (req, res) => {
+  const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(String(req.query.month || '')) ? String(req.query.month) : new Date(Date.now() + 3600e3).toISOString().slice(0, 7);
+  const found = db.prepare(`SELECT m.status AS status, m.channel AS channel, c.class_name AS class_name, ${KIND_SQL} AS kind, COUNT(*) AS n
+    ${HISTORY_FROM} WHERE m.school_id=? AND strftime('%Y-%m', ${WHEN_SQL}) = ? GROUP BY m.status, m.channel, c.class_name, kind`).all(req.user.school_id, month);
+  const totals = { sent: 0, delivered: 0, failed: 0, skipped: 0, draft: 0, whatsapp: 0, sms: 0 };
+  const byKind = {}, byClass = {};
+  const add = (map, key, label, bucket, n) => { const e = map[key] || (map[key] = { key, label, sent: 0, failed: 0, skipped: 0, draft: 0 }); e[bucket] += n; };
+  for (const r of found) {
+    const bucket = ['queued', 'sent', 'delivered', 'read'].includes(r.status) ? 'sent' : r.status;
+    totals[bucket] += r.n;
+    if (r.status === 'delivered' || r.status === 'read') totals.delivered += r.n;
+    if (bucket === 'sent') totals[r.channel === 'sms' ? 'sms' : 'whatsapp'] += r.n;
+    add(byKind, r.kind || '', ai.KINDS[r.kind] || 'Other', bucket, r.n);
+    add(byClass, r.class_name == null ? '\u0000' : r.class_name, r.class_name == null ? '(parent removed)' : (r.class_name || 'No class'), bucket, r.n);
+  }
+  const order = (map) => Object.values(map).sort((a, b) => (b.sent + b.failed + b.skipped + b.draft) - (a.sent + a.failed + a.skipped + a.draft) || a.label.localeCompare(b.label));
+  res.json({ month, totals, by_kind: order(byKind), by_class: order(byClass) });
+});
+
 app.get('/api/stats', requireAuth, (req, res) => {
   res.json(db.prepare(`SELECT status, COUNT(*) n FROM messages WHERE school_id=? AND created_at >= datetime('now','-30 days') GROUP BY status`).all(req.user.school_id));
 });
