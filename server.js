@@ -754,7 +754,7 @@ app.get('/api/platform/teacher', requireAuth, requireAdmin, ownerOnly, (req, res
   const u = db.prepare('SELECT u.id, u.name, u.email, u.role, u.school_id, s.name AS school_name FROM users u JOIN schools s ON s.id = u.school_id WHERE lower(u.email) = ?').get(email);
   const schools = db.prepare('SELECT id, name FROM schools ORDER BY name').all();
   if (!u) return res.json({ found: false, schools });
-  res.json({ found: true, user: u, can_change: u.role === 'staff', schools });
+  res.json({ found: true, user: u, can_change: u.role === 'staff', is_you: u.id === req.user.id, schools });
 });
 
 app.post('/api/platform/teacher/move', requireAuth, requireAdmin, ownerOnly, (req, res) => {
@@ -836,6 +836,49 @@ app.post('/api/platform/schools', requireAuth, requireAdmin, ownerOnly, (req, re
     'SmartClass AI Academy',
   ].join('\n');
   res.json({ ok: true, school: { id: created, name: schoolName }, admin: { name: adminName, email }, password, generated, welcome });
+});
+
+// ---------------------------------------------------------------- administrator tools (owner only)
+// Change an administrator's email, or give them a new temporary password. Never your own account, never a teacher.
+function adminTarget(req, res) {
+  const t = db.prepare('SELECT u.*, s.name AS school_name FROM users u JOIN schools s ON s.id = u.school_id WHERE u.id = ?').get(Number((req.body || {}).id) || 0);
+  if (!t) { res.status(404).json({ error: 'That account was not found' }); return null; }
+  if (t.id === req.user.id) { res.status(400).json({ error: 'This is your own account. It cannot be changed here' }); return null; }
+  if (t.role !== 'admin') { res.status(400).json({ error: 'This tool is only for administrator accounts. Use Fix a teacher account for teachers' }); return null; }
+  return t;
+}
+const tableExists = (name) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+
+app.post('/api/platform/admin/email', requireAuth, requireAdmin, ownerOnly, (req, res) => {
+  const t = adminTarget(req, res); if (!t) return;
+  const email = String((req.body || {}).email || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 150) return res.status(400).json({ error: 'Type a valid email address' });
+  if (email === String(t.email).toLowerCase()) return res.status(400).json({ error: 'That is already their email address' });
+  if (db.prepare('SELECT 1 FROM users WHERE lower(email) = ? AND id != ?').get(email, t.id)) return res.status(409).json({ error: 'That email already has an account' });
+  if (!saveStaffChange(res, () => {
+    db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, t.id);
+    recordStaffAction(req.user, 'email_changed', { school_id: t.school_id, name: t.name, email }, `from ${t.email} to ${email}`);
+  })) return;
+  const message = [`Hello ${t.name},`, '', `The email address of your Parent Communication Bot account is now: ${email}`, 'Use it to sign in. Your password has not changed.', '',
+    `Open: ${req.protocol}://${req.get('host')}`, '', 'Need help? WhatsApp 0805 480 1320.', 'SmartClass AI Academy'].join('\n');
+  res.json({ ok: true, name: t.name, email, message });
+});
+
+app.post('/api/platform/admin/password', requireAuth, requireAdmin, ownerOnly, (req, res) => {
+  const t = adminTarget(req, res); if (!t) return;
+  const password = makeTempPassword();
+  const hasSecurity = tableExists('user_security'), hasResets = tableExists('password_resets');
+  if (!saveStaffChange(res, () => {
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash(password), t.id);
+    if (hasResets) db.prepare('UPDATE password_resets SET used = 1 WHERE user_id = ?').run(t.id);   // old reset codes stop working
+    if (hasSecurity) db.prepare('INSERT INTO user_security (user_id, pw_changed_at) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET pw_changed_at = excluded.pw_changed_at').run(t.id, Date.now());   // open sessions are signed out
+    recordStaffAction(req.user, 'password_reset', t, 'new temporary password');
+  })) return;
+  const message = [`Hello ${t.name},`, '', 'Your Parent Communication Bot password has been reset.', '',
+    `Open: ${req.protocol}://${req.get('host')}`, `Email: ${t.email}`, `Temporary password: ${password}`, '',
+    'Sign in with it. To choose your own password, click “Get a code by email” on the sign-in page. The code is sent to the email above.', '',
+    'Need help? WhatsApp 0805 480 1320.', 'SmartClass AI Academy'].join('\n');
+  res.json({ ok: true, name: t.name, email: t.email, password, message });
 });
 
 app.get('/health', (_req, res) => res.json({ ok: true }));

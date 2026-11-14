@@ -287,8 +287,8 @@
         <td>${s.failed}</td><td>${s.skipped}</td>
         <td class="small" style="white-space:nowrap">${s.last_message ? esc(String(s.last_message).slice(0, 16)) : '<span class="muted">No messages yet</span>'}</td>
         <td class="small">SMS ID: ${esc(s.sender_id)}<br>School Management: ${s.sm_connected ? 'connected' : 'not connected'}${s.require_consent ? '<br>Consent required' : ''}${s.auto_send_absence ? '<br>Auto-send absence alerts' : ''}</td></tr>`).join('');
-      const welcomeCard = S.welcome ? `<div class="card"><h3>School created: ${esc(S.welcome.school.name)}</h3>
-        <p class="small muted" style="margin:6px 0 10px">Send this message to the administrator. The temporary password is shown only here, so copy the message now.</p>
+      const welcomeCard = S.welcome ? `<div class="card"><h3>${esc(S.welcome.title || 'School created: ' + S.welcome.school.name)}</h3>
+        <p class="small muted" style="margin:6px 0 10px">${esc(S.welcome.note || 'Send this message to the administrator. The temporary password is shown only here, so copy the message now.')}</p>
         <textarea id="welcomeText" readonly style="min-height:240px">${esc(S.welcome.welcome)}</textarea>
         <div class="row" style="margin-top:10px"><button class="btn" data-a="copy-welcome">Copy message</button>
           <a class="btn ghost" href="https://wa.me/?text=${encodeURIComponent(S.welcome.welcome)}" target="_blank" rel="noopener">Send on WhatsApp</a>
@@ -298,21 +298,35 @@
         <div class="grid"><label>School name<input id="newSchoolName" maxlength="120"></label><label>Administrator’s name<input id="newAdminName" maxlength="120"></label>
           <label>Administrator’s email<input id="newAdminEmail" type="email" placeholder="admin@school.com"></label><label>Temporary password (optional)<input id="newAdminPw" autocomplete="off"></label>
           <div style="align-self:end"><button class="btn" data-a="add-school">Add school</button></div></div></div>`;
-      S.fix = null;
+      const adminCard = `<div class="card"><h3>Administrator tools</h3>
+        <p class="small muted" style="margin:6px 0 10px">Type the exact email of a school administrator to change their email, or to give them a new temporary password. Teachers and your own account cannot be changed here.</p>
+        <div class="row"><input id="admEmail" type="email" placeholder="admin@school.com" style="max-width:340px"><button class="btn" data-a="adm-find">Find</button></div><div id="admResult"></div></div>`;
+      S.fix = null; S.adm = null;
       const fixCard = `<div class="card"><h3>Fix a teacher account</h3>
         <p class="small muted" style="margin:6px 0 10px">Type the exact email of a teacher account to move it to another school, or to delete it. Administrator accounts cannot be changed here.</p>
         <div class="row"><input id="fixEmail" type="email" placeholder="teacher@example.com" style="max-width:340px"><button class="btn" data-a="fix-find">Find</button></div><div id="fixResult"></div></div>`;
-      const actionsCard = `<div class="card"><h3>Recent account changes</h3>${d.actions && d.actions.length ? `<table><tbody>${d.actions.map((x) => `<tr><td class="small" style="white-space:nowrap">${esc(String(x.at).slice(0, 16))}</td><td>${x.action === 'school_added' ? `Added school <strong>${esc(x.detail || '')}</strong>, administrator <strong>${esc(x.target_name)}</strong> <span class="muted">${esc(x.target_email)}</span>` : `${x.action === 'removed' ? 'Removed' : 'Moved'} <strong>${esc(x.target_name)}</strong> <span class="muted">${esc(x.target_email)}</span>${x.action === 'removed' ? ` from ${esc(x.school_name || 'a school')}` : ` ${esc(x.detail || '')}`}`}</td><td class="small muted">by ${esc(x.actor_name)}</td></tr>`).join('')}</tbody></table>` : '<p class="small muted" style="margin:6px 0 0">No changes yet.</p>'}</div>`;
+      const actionsCard = `<div class="card"><h3>Recent account changes</h3>${d.actions && d.actions.length ? `<table><tbody>${d.actions.map((x) => `<tr><td class="small" style="white-space:nowrap">${esc(String(x.at).slice(0, 16))}</td><td>${x.action === 'school_added' ? `Added school <strong>${esc(x.detail || '')}</strong>, administrator <strong>${esc(x.target_name)}</strong> <span class="muted">${esc(x.target_email)}</span>` : x.action === 'email_changed' ? `Changed the email of <strong>${esc(x.target_name)}</strong> ${esc(x.detail || '')}` : x.action === 'password_reset' ? `Gave <strong>${esc(x.target_name)}</strong> <span class="muted">${esc(x.target_email)}</span> a new temporary password` : `${x.action === 'removed' ? 'Removed' : 'Moved'} <strong>${esc(x.target_name)}</strong> <span class="muted">${esc(x.target_email)}</span>${x.action === 'removed' ? ` from ${esc(x.school_name || 'a school')}` : ` ${esc(x.detail || '')}`}`}</td><td class="small muted">by ${esc(x.actor_name)}</td></tr>`).join('')}</tbody></table>` : '<p class="small muted" style="margin:6px 0 0">No changes yet.</p>'}</div>`;
       $('#view').innerHTML = `
         <div class="head"><div><h1>Platform</h1><p class="muted">How every school uses the bot. It shows counts only, never parents’ names, phone numbers or message text.</p></div>
           <label>Month<input type="month" id="platMonth" value="${esc(d.month)}" style="max-width:190px"></label></div>
         ${welcomeCard}
         <div class="grid" style="margin-bottom:12px">${tile('Schools', t.schools)}${tile('Parents', t.parents)}${tile('Sent this month', t.sent)}${tile('Failed', t.failed)}${tile('Held back', t.skipped)}</div>
         <p class="small muted" style="margin:0 0 14px">${t.whatsapp} by WhatsApp, ${t.sms} by SMS, ${t.delivered} confirmed delivered. Right now ${t.drafts} drafts and ${t.scheduled} scheduled messages are waiting across all accounts. Sent, Failed and Held back are for the month chosen (Nigerian time).</p>
-        ${d.schools.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>School and administrators</th><th>Teachers</th><th>Parents</th><th>Sent</th><th>Failed</th><th>Held back</th><th>Last message</th><th>Settings</th></tr></thead><tbody>${body}</tbody></table></div>` : '<div class="card empty">No schools yet.</div>'}${addCard}${fixCard}${actionsCard}`;
+        ${d.schools.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>School and administrators</th><th>Teachers</th><th>Parents</th><th>Sent</th><th>Failed</th><th>Held back</th><th>Last message</th><th>Settings</th></tr></thead><tbody>${body}</tbody></table></div>` : '<div class="card empty">No schools yet.</div>'}${addCard}${adminCard}${fixCard}${actionsCard}`;
     } catch (e) { toast(e.message, true); }
   }
 
+  function renderAdm() {
+    const box = $('#admResult'), r = S.adm;
+    if (!box || !r) return;
+    if (!r.found) { box.innerHTML = '<p class="err" style="margin-top:10px">No account has that email.</p>'; return; }
+    const u = r.user;
+    if (r.is_you) { box.innerHTML = '<p style="margin-top:12px">This is your own account. It cannot be changed here.</p>'; return; }
+    if (u.role !== 'admin') { box.innerHTML = `<p style="margin-top:12px"><strong>${esc(u.name)}</strong> <span class="muted">${esc(u.email)}</span> is a teacher at ${esc(u.school_name)}. Use <strong>Fix a teacher account</strong> for teachers.</p>`; return; }
+    box.innerHTML = `<p style="margin-top:12px"><strong>${esc(u.name)}</strong> <span class="muted">${esc(u.email)}</span><br>Administrator at <strong>${esc(u.school_name)}</strong></p>
+      <div class="row"><label>New email<input id="admNewEmail" type="email" placeholder="admin@school.com"></label><button class="btn" data-a="adm-email" style="align-self:end">Change email</button>
+        <span class="spacer"></span><button class="btn ghost" data-a="adm-password" style="align-self:end">New temporary password</button></div>`;
+  }
   function renderFix() {
     const box = $('#fixResult'), r = S.fix;
     if (!box || !r) return;
@@ -475,6 +489,26 @@
       catch { $('#welcomeText').focus && $('#welcomeText').focus(); toast('Select the message and copy it (Ctrl + C)', true); }
     }
     else if (a === 'close-welcome') { S.welcome = null; await viewPlatform(); }
+    else if (a === 'adm-find') {
+      const mail = $('#admEmail').value.trim();
+      if (!mail) return toast('Type the email address of the account', true);
+      S.adm = await api('/platform/teacher?email=' + encodeURIComponent(mail)); renderAdm();
+    }
+    else if (a === 'adm-email') {
+      const u = S.adm.user, mail = $('#admNewEmail').value.trim();
+      if (!mail) return toast('Type the new email address', true);
+      if (!confirm(`Change the email of ${u.name} from ${u.email} to ${mail}? Their password stays the same. School Management’s Open button matches people by email, so tell the school.`)) return;
+      const r = await api('/platform/admin/email', { method: 'POST', body: { id: u.id, email: mail } });
+      S.welcome = { title: `Email changed: ${r.name}`, note: 'Send this message so the administrator knows the new email address.', welcome: r.message };
+      toast(`Email changed for ${r.name}`); await viewPlatform();
+    }
+    else if (a === 'adm-password') {
+      const u = S.adm.user;
+      if (!confirm(`Give ${u.name} (${u.email}) a new temporary password? They will be signed out and must use the new password.`)) return;
+      const r = await api('/platform/admin/password', { method: 'POST', body: { id: u.id } });
+      S.welcome = { title: `New temporary password: ${r.name}`, welcome: r.message };
+      toast(`New temporary password for ${r.name}`); await viewPlatform();
+    }
     else if (a === 'rm-teacher') {
       if (!confirm(`Remove ${el.dataset.name} (${el.dataset.email})? They will no longer be able to sign in. Parents and messages are not affected.`)) return;
       await api('/users/' + el.dataset.uid, { method: 'DELETE' });
