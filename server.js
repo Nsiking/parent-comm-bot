@@ -350,11 +350,30 @@ function releaseHeld(schoolId) {
     AND contact_id IN (SELECT id FROM contacts WHERE school_id=? AND consent_at IS NOT NULL)`).run(schoolId, schoolId);
 }
 
+// A birthday is kept as MM-DD (the year is not needed). People type it the Nigerian way, day first: 15/03, 15-3, 15 March, 15/03/2014.
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const DAYS_IN = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+// -> 'MM-DD', '' (nothing typed) or null (not a date)
+function parseBirthday(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return '';
+  let d, m, x;
+  if ((x = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s))) { m = +x[2]; d = +x[3]; }
+  else if ((x = /^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})(?:\s*[\/\-.]\s*\d{2,4})?$/.exec(s))) { d = +x[1]; m = +x[2]; }
+  else if ((x = /^(\d{1,2})(?:st|nd|rd|th)?[\s\-\/.]*([A-Za-z]{3,9})\.?(?:[\s,\-\/.]*\d{2,4})?$/.exec(s))) { d = +x[1]; m = MONTHS.indexOf(x[2].slice(0, 3).toLowerCase()) + 1; }
+  else if ((x = /^([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*\d{4})?$/.exec(s))) { m = MONTHS.indexOf(x[1].slice(0, 3).toLowerCase()) + 1; d = +x[2]; }
+  else return null;
+  if (!(m >= 1 && m <= 12 && d >= 1 && d <= DAYS_IN[m - 1])) return null;
+  return String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+const bdayShow = (md) => (/^\d{2}-\d{2}$/.test(md || '') ? md.slice(3) + '/' + md.slice(0, 2) : '');
 function cleanContact(b) {
   const phone = ch.normalizePhone(b.phone);
   const student = String(b.student_name || '').trim();
   if (!student) return { error: 'Student name is required' };
   if (!phone) return { error: `Invalid phone number: ${b.phone || '(empty)'}` };
+  const bday = parseBirthday(b.birthday);
+  if (bday === null) return { error: `Invalid birthday: ${b.birthday}. Write the day first, like 15/03` };
   return {
     student_name: student,
     class_name: String(b.class_name || '').trim(),
@@ -362,6 +381,7 @@ function cleanContact(b) {
     parent_name: String(b.parent_name || '').trim(),
     phone,
     channel: String(b.channel || '').toLowerCase() === 'sms' ? 'sms' : 'whatsapp',
+    birthday: bday,
   };
 }
 
@@ -370,8 +390,8 @@ app.post('/api/contacts', requireAuth, (req, res) => {
   if (c.error) return res.status(400).json({ error: c.error });
   { const mine = myClasses(req.user); if (mine && !mine.includes(c.class_name)) return res.status(403).json({ error: NOT_YOUR_CLASS }); }
   const src = consentFrom((req.body || {}).consent);
-  db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, admission_no, parent_name, phone, channel, consent_at, consent_source) VALUES (?,?,?,?,?,?,?,?,?)`)
-    .run(req.user.school_id, c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel, src ? todayStr() : null, src);
+  db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, admission_no, parent_name, phone, channel, consent_at, consent_source, birthday) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .run(req.user.school_id, c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel, src ? todayStr() : null, src, c.birthday || null);
   res.json({ ok: true });
 });
 
@@ -385,6 +405,12 @@ app.put('/api/contacts/:id', requireAuth, (req, res) => {
     db.prepare('UPDATE contacts SET opted_out=? WHERE id=?').run(b.opted_out ? 1 : 0, existing.id);
     return res.json({ ok: true });
   }
+  if (Object.keys(b).length === 1 && 'birthday' in b) {
+    const bd = parseBirthday(b.birthday);
+    if (bd === null) return res.status(400).json({ error: `Invalid birthday: ${b.birthday}. Write the day first, like 15/03` });
+    db.prepare('UPDATE contacts SET birthday=? WHERE id=?').run(bd || null, existing.id);
+    return res.json({ ok: true, birthday: bdayShow(bd) });
+  }
   if ('consent_source' in b && Object.keys(b).every((k) => ['consent_source', 'consent_at'].includes(k))) {
     const src = String(b.consent_source || '');
     if (!src) db.prepare('UPDATE contacts SET consent_at=NULL, consent_source=NULL WHERE id=?').run(existing.id);
@@ -395,11 +421,11 @@ app.put('/api/contacts/:id', requireAuth, (req, res) => {
     } else return res.status(400).json({ error: 'Unknown consent source' });
     return res.json({ ok: true });
   }
-  const c = cleanContact({ ...existing, ...b });
+  const c = cleanContact({ ...existing, birthday: bdayShow(existing.birthday), ...b });
   if (c.error) return res.status(400).json({ error: c.error });
   if (mineCls && !mineCls.includes(c.class_name)) return res.status(403).json({ error: NOT_YOUR_CLASS });
-  db.prepare(`UPDATE contacts SET student_name=?, class_name=?, admission_no=?, parent_name=?, phone=?, channel=? WHERE id=?`)
-    .run(c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel, existing.id);
+  db.prepare(`UPDATE contacts SET student_name=?, class_name=?, admission_no=?, parent_name=?, phone=?, channel=?, birthday=? WHERE id=?`)
+    .run(c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel, c.birthday || null, existing.id);
   res.json({ ok: true });
 });
 
@@ -419,8 +445,8 @@ app.post('/api/contacts/import', requireAuth, (req, res) => {
   const skipped = [];
   const mineCls = myClasses(req.user);
   const find = db.prepare('SELECT id FROM contacts WHERE school_id=? AND phone=? AND lower(student_name)=lower(?)');
-  const ins = db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, admission_no, parent_name, phone, channel, consent_at, consent_source) VALUES (?,?,?,?,?,?,?,?,?)`);
-  const upd = db.prepare('UPDATE contacts SET class_name=?, admission_no=?, parent_name=?, channel=? WHERE id=?');
+  const ins = db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, admission_no, parent_name, phone, channel, consent_at, consent_source, birthday) VALUES (?,?,?,?,?,?,?,?,?,?)`);
+  const upd = db.prepare("UPDATE contacts SET class_name=?, admission_no=?, parent_name=?, channel=?, birthday=CASE WHEN ?<>'' THEN ? ELSE birthday END WHERE id=?");
   const setConsent = db.prepare('UPDATE contacts SET consent_at=?, consent_source=? WHERE id=? AND consent_at IS NULL');
   db.transaction(() => {
     rows.forEach((r, i) => {
@@ -429,8 +455,8 @@ app.post('/api/contacts/import', requireAuth, (req, res) => {
       if (mineCls && !mineCls.includes(c.class_name)) return skipped.push({ row: i + 2, reason: c.class_name ? `Class ${c.class_name} is not one of yours` : 'A class is required for your account' });
       const src = consentFrom(r.consent);
       const hit = find.get(req.user.school_id, c.phone, c.student_name);
-      if (hit) { upd.run(c.class_name, c.admission_no, c.parent_name, c.channel, hit.id); if (src) setConsent.run(todayStr(), src, hit.id); updated++; }
-      else { ins.run(req.user.school_id, c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel, src ? todayStr() : null, src); added++; }
+      if (hit) { upd.run(c.class_name, c.admission_no, c.parent_name, c.channel, c.birthday, c.birthday, hit.id); if (src) setConsent.run(todayStr(), src, hit.id); updated++; }
+      else { ins.run(req.user.school_id, c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel, src ? todayStr() : null, src, c.birthday || null); added++; }
     });
   })();
   releaseHeld(req.user.school_id);
@@ -1299,6 +1325,187 @@ const scheduleTimer = setInterval(runScheduled, Number(process.env.SCHEDULE_CHEC
 if (scheduleTimer.unref) scheduleTimer.unref();
 const firstScheduleCheck = setTimeout(runScheduled, 5000);
 if (firstScheduleCheck.unref) firstScheduleCheck.unref();
+
+// ---------------------------------------------------------------- quick replies (saved answers to what parents write back)
+// Words in {curly brackets} are filled in on the screen: {parent}, {child}, {school}, {me}. Nothing is sent from here; WhatsApp opens with the text ready.
+const MAX_REPLY_TEMPLATES = 30;
+const rtRow = (t) => ({ id: t.id, title: t.title, body: t.body });
+const rtClean = (b) => {
+  const title = String(b?.title || '').replace(/\s+/g, ' ').trim(), body = String(b?.body || '').trim();
+  if (!title) return { error: 'Give the quick reply a short name' };
+  if (title.length > 40) return { error: 'The name is too long (max 40 characters)' };
+  if (body.length < 3) return { error: 'Write the reply text' };
+  if (body.length > 1000) return { error: 'The reply is too long (max 1,000 characters)' };
+  return { title, body };
+};
+const RT_STARTERS = [
+  ['Received, thank you', 'Dear {parent}, thank you for your message about {child}. We have received it and will get back to you shortly. - {school}'],
+  ['Please call the office', 'Dear {parent}, thank you for writing to us about {child}. Please call the school office so that we can talk it through properly. - {school}'],
+  ['Absence noted', 'Dear {parent}, thank you for letting us know. We have noted the reason for {child}\'s absence. - {school}'],
+  ['Fees: see the bursar', 'Dear {parent}, thank you for your message. Please see the school bursar about the fees for {child}, and we will gladly help. - {school}'],
+];
+app.get('/api/reply-templates', requireAuth, (req, res) => {
+  res.json(db.prepare('SELECT id, title, body FROM reply_templates WHERE school_id=? ORDER BY lower(title), id').all(req.user.school_id));
+});
+app.post('/api/reply-templates', requireAuth, requireAdmin, (req, res) => {
+  const c = rtClean(req.body); if (c.error) return res.status(400).json({ error: c.error });
+  if (db.prepare('SELECT COUNT(*) n FROM reply_templates WHERE school_id=?').get(req.user.school_id).n >= MAX_REPLY_TEMPLATES)
+    return res.status(400).json({ error: `You can keep up to ${MAX_REPLY_TEMPLATES} quick replies. Delete one you no longer use.` });
+  const id = Number(db.prepare('INSERT INTO reply_templates(school_id, title, body) VALUES (?,?,?)').run(req.user.school_id, c.title, c.body).lastInsertRowid);
+  logActivity(req.user, 'settings', `Quick reply added: ${c.title}`);
+  res.json({ id });
+});
+app.post('/api/reply-templates/starters', requireAuth, requireAdmin, (req, res) => {
+  if (db.prepare('SELECT COUNT(*) n FROM reply_templates WHERE school_id=?').get(req.user.school_id).n) return res.status(400).json({ error: 'You already have quick replies' });
+  const ins = db.prepare('INSERT INTO reply_templates(school_id, title, body) VALUES (?,?,?)');
+  db.transaction(() => RT_STARTERS.forEach(([t, b]) => ins.run(req.user.school_id, t, b)))();
+  logActivity(req.user, 'settings', 'Quick replies: example replies added');
+  res.json({ added: RT_STARTERS.length });
+});
+app.put('/api/reply-templates/:id', requireAuth, requireAdmin, (req, res) => {
+  const c = rtClean(req.body); if (c.error) return res.status(400).json({ error: c.error });
+  const r = db.prepare('UPDATE reply_templates SET title=?, body=? WHERE id=? AND school_id=?').run(c.title, c.body, Number(req.params.id) || 0, req.user.school_id);
+  if (!r.changes) return res.status(404).json({ error: 'That quick reply was not found' });
+  res.json({ ok: true });
+});
+app.delete('/api/reply-templates/:id', requireAuth, requireAdmin, (req, res) => {
+  const r = db.prepare('DELETE FROM reply_templates WHERE id=? AND school_id=?').run(Number(req.params.id) || 0, req.user.school_id);
+  if (r.changes) logActivity(req.user, 'settings', 'Quick reply deleted');
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------- special days: birthdays and holidays
+// The bot only PREPARES drafts a few days ahead (they wait in Messages > Drafts). It never sends anything by itself.
+const watDate = (offsetDays = 0) => new Date(Date.now() + 3600e3 + offsetDays * 86400e3).toISOString().slice(0, 10);
+const dayNum = (ymd) => Math.round(Date.UTC(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, +ymd.slice(8, 10)) / 86400e3);
+const isLeap = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+// the next date on or after `today` that falls on month-day `md` ('MM-DD'); 29 February is kept on 28 February in other years
+function nextOn(md, today) {
+  const at = (y) => (md === '02-29' && !isLeap(y) ? `${y}-02-28` : `${y}-${md}`);
+  const y = +today.slice(0, 4), a = at(y);
+  return a >= today ? a : at(y + 1);
+}
+const niceDate = (ymd) => `${+ymd.slice(8, 10)} ${['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][+ymd.slice(5, 7) - 1]}`;
+const validYmd = (s) => { const x = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || '')); return !!x && +x[2] >= 1 && +x[2] <= 12 && +x[3] >= 1 && +x[3] <= DAYS_IN[+x[2] - 1] && (+x[2] !== 2 || +x[3] <= 28 || isLeap(+x[1])); };
+// the date this special day next falls on, or null if it was a one-off that has passed
+const holidayNext = (h, today) => (h.yearly ? nextOn(h.day.slice(5), today) : (h.day >= today ? h.day : null));
+const AUTO = (sid) => ({ school_id: sid, id: -1, name: 'Automatic' });
+const MAX_SPECIAL_DAYS = 200, MAX_AUTO_AUDIENCE = 1000;
+
+const dayRow = (h, today) => { const nx = holidayNext(h, today); return { id: h.id, title: h.title, day: h.day, yearly: !!h.yearly, message: h.message, next: nx, in_days: nx ? dayNum(nx) - dayNum(today) : null }; };
+app.get('/api/special-days', requireAuth, requireAdmin, (req, res) => {
+  const sid = req.user.school_id, today = watDate(), sc = schoolRow(sid);
+  const days = db.prepare('SELECT * FROM special_days WHERE school_id=?').all(sid).map((h) => dayRow(h, today))
+    .sort((a, b) => (a.next === null) - (b.next === null) || String(a.next).localeCompare(String(b.next)) || a.title.localeCompare(b.title));
+  const withB = db.prepare("SELECT id, student_name, class_name, birthday FROM contacts WHERE school_id=? AND birthday IS NOT NULL AND birthday<>''").all(sid);
+  const upcoming = withB.map((c) => { const nx = nextOn(c.birthday, today); return { student_name: c.student_name, class_name: c.class_name, birthday: bdayShow(c.birthday), next: nx, in_days: dayNum(nx) - dayNum(today) }; })
+    .filter((c) => c.in_days <= 30).sort((a, b) => a.in_days - b.in_days || a.student_name.localeCompare(b.student_name));
+  res.json({ settings: { birthday_msgs: !!sc.birthday_msgs, ahead: sc.special_ahead }, days, today,
+    birthdays: { recorded: withB.length, total: db.prepare('SELECT COUNT(*) n FROM contacts WHERE school_id=?').get(sid).n, upcoming: upcoming.slice(0, 30), upcoming_total: upcoming.length } });
+});
+function dayClean(b) {
+  const title = String(b?.title || '').replace(/\s+/g, ' ').trim(), message = String(b?.message || '').trim();
+  if (!title) return { error: 'Give the special day a name, like Christmas break' };
+  if (title.length > 60) return { error: 'The name is too long (max 60 characters)' };
+  if (!validYmd(b?.day)) return { error: 'Choose a valid date' };
+  if (message.length < 3) return { error: 'Write what the message should say, like "Merry Christmas! School closes on 18 December and resumes on 6 January."' };
+  if (message.length > 500) return { error: 'That is too long (max 500 characters)' };
+  return { title, day: String(b.day), yearly: b?.yearly ? 1 : 0, message };
+}
+app.post('/api/special-days', requireAuth, requireAdmin, (req, res) => {
+  const c = dayClean(req.body); if (c.error) return res.status(400).json({ error: c.error });
+  if (db.prepare('SELECT COUNT(*) n FROM special_days WHERE school_id=?').get(req.user.school_id).n >= MAX_SPECIAL_DAYS) return res.status(400).json({ error: `You can keep up to ${MAX_SPECIAL_DAYS} special days. Delete old ones.` });
+  const id = Number(db.prepare('INSERT INTO special_days(school_id, title, day, yearly, message) VALUES (?,?,?,?,?)').run(req.user.school_id, c.title, c.day, c.yearly, c.message).lastInsertRowid);
+  logActivity(req.user, 'settings', `Special day added: ${c.title}, ${niceDate(c.day)}${c.yearly ? ' (every year)' : ''}`);
+  res.json({ id });
+});
+app.put('/api/special-days/:id', requireAuth, requireAdmin, (req, res) => {
+  const c = dayClean(req.body); if (c.error) return res.status(400).json({ error: c.error });
+  const r = db.prepare('UPDATE special_days SET title=?, day=?, yearly=?, message=? WHERE id=? AND school_id=?').run(c.title, c.day, c.yearly, c.message, Number(req.params.id) || 0, req.user.school_id);
+  if (!r.changes) return res.status(404).json({ error: 'That special day was not found' });
+  db.prepare("DELETE FROM special_log WHERE school_id=? AND key LIKE ?").run(req.user.school_id, `hol:${Number(req.params.id)}:%`);   // changed: it may be prepared again
+  res.json({ ok: true });
+});
+app.delete('/api/special-days/:id', requireAuth, requireAdmin, (req, res) => {
+  const r = db.prepare('DELETE FROM special_days WHERE id=? AND school_id=?').run(Number(req.params.id) || 0, req.user.school_id);
+  if (r.changes) logActivity(req.user, 'settings', 'Special day deleted');
+  res.json({ ok: true });
+});
+app.put('/api/special-settings', requireAuth, requireAdmin, (req, res) => {
+  const b = req.body || {}, cur = schoolRow(req.user.school_id);
+  const ahead = b.ahead == null ? cur.special_ahead : Math.min(14, Math.max(1, Math.round(Number(b.ahead)) || cur.special_ahead));
+  const bm = b.birthday_msgs == null ? cur.birthday_msgs : (b.birthday_msgs ? 1 : 0);
+  db.prepare('UPDATE schools SET birthday_msgs=?, special_ahead=? WHERE id=?').run(bm, ahead, req.user.school_id);
+  if (bm !== cur.birthday_msgs || ahead !== cur.special_ahead) logActivity(req.user, 'settings', `Birthday messages ${bm ? 'on' : 'off'}; drafts prepared ${ahead} day${ahead === 1 ? '' : 's'} ahead`);
+  res.json({ ok: true, birthday_msgs: !!bm, ahead });
+});
+
+// Prepare drafts for one school: the same rules as the Compose page (opted-out parents and, if required, parents without consent are left out).
+async function prepareSpecial(school, today) {
+  const sid = school.id, ahead = Math.min(14, Math.max(1, school.special_ahead || 2));
+  const logged = (k) => !!db.prepare('SELECT 1 FROM special_log WHERE school_id=? AND key=?').get(sid, k);
+  const eligible = (list) => list.filter((c) => !c.opted_out && (!school.require_consent || c.consent_at));
+  const out = { batches: 0, messages: 0 };
+  async function make(kind, facts, contacts, keys, label) {
+    if (!contacts.length) return;   // nobody to write to right now (opted out, or no consent yet): try again at the next check
+    const drafts = {};
+    for (let i = 0; i < contacts.length; i += 100)
+      Object.assign(drafts, await ai.draftMessages({ school, kind, tone: school.default_tone, language: school.default_language, facts, contacts: contacts.slice(i, i + 100), notes: {} }));
+    db.transaction(() => {
+      const b = db.prepare('INSERT INTO batches(school_id, kind, tone, language, facts, created_by) VALUES (?,?,?,?,?,NULL)').run(sid, kind, school.default_tone, school.default_language, facts).lastInsertRowid;
+      const ins = db.prepare('INSERT INTO messages(school_id, batch_id, contact_id, phone, channel, body, ai) VALUES (?,?,?,?,?,?,?)');
+      for (const c of contacts) ins.run(sid, b, c.id, c.phone, c.channel, drafts[c.id].body, drafts[c.id].ai);
+      keys.forEach((k) => db.prepare('INSERT OR IGNORE INTO special_log(school_id, key) VALUES (?,?)').run(sid, k));
+    })();
+    out.batches++; out.messages += contacts.length;
+    logActivity(AUTO(sid), 'drafted', `${plural(contacts.length, 'message')} prepared ahead: ${label}. Check them in Messages before sending.`);
+  }
+  for (const h of db.prepare('SELECT * FROM special_days WHERE school_id=?').all(sid)) {
+    const nx = holidayNext(h, today); if (!nx) continue;
+    const gap = dayNum(nx) - dayNum(today), key = `hol:${h.id}:${nx}`;
+    if (gap > ahead || logged(key)) continue;
+    const people = eligible(db.prepare('SELECT * FROM contacts WHERE school_id=?').all(sid)).slice(0, MAX_AUTO_AUDIENCE);
+    await make('holiday', h.message, people, [key], `${h.title} (${niceDate(nx)})`);
+  }
+  if (school.birthday_msgs) {
+    const byDate = {};
+    for (const c of db.prepare("SELECT * FROM contacts WHERE school_id=? AND birthday IS NOT NULL AND birthday<>''").all(sid)) {
+      const nx = nextOn(c.birthday, today);
+      if (dayNum(nx) - dayNum(today) > ahead || logged(`bday:${c.id}:${nx}`)) continue;
+      (byDate[nx] = byDate[nx] || []).push(c);
+    }
+    for (const [nx, list] of Object.entries(byDate).sort((a, b) => a[0].localeCompare(b[0]))) {
+      const who = eligible(list).slice(0, MAX_AUTO_AUDIENCE);
+      await make('birthday', `Birthday on ${niceDate(nx)}`, who, who.map((c) => `bday:${c.id}:${nx}`), `${plural(who.length, 'birthday')} on ${niceDate(nx)}`);
+    }
+  }
+  return out;
+}
+let specialRunning = false;
+async function runSpecialDays(onlySchool) {
+  if (specialRunning) return null;
+  specialRunning = true;
+  const total = { batches: 0, messages: 0 };
+  try {
+    const today = watDate();
+    const schools = onlySchool ? [schoolRow(onlySchool)] : db.prepare('SELECT * FROM schools').all();
+    for (const s of schools) {
+      if (!s) continue;
+      try { const r = await prepareSpecial(s, today); total.batches += r.batches; total.messages += r.messages; }
+      catch (e) { console.error('Special days error (school ' + s.id + ')', e); }
+    }
+    if (Math.random() < 0.05) db.prepare("DELETE FROM special_log WHERE created_at < datetime('now', '-400 days')").run();
+  } finally { specialRunning = false; }
+  return total;
+}
+app.post('/api/special-days/run', requireAuth, requireAdmin, wrap(async (req, res) => {
+  const r = await runSpecialDays(req.user.school_id);
+  res.json(r || { batches: 0, messages: 0, busy: true });
+}));
+const specialTimer = setInterval(() => runSpecialDays(), Number(process.env.SPECIAL_CHECK_SECONDS || 1800) * 1000);
+if (specialTimer.unref) specialTimer.unref();
+const firstSpecialCheck = setTimeout(() => runSpecialDays(), 20000);
+if (firstSpecialCheck.unref) firstSpecialCheck.unref();
 
 // ---------------------------------------------------------------- platform console (owner account only): counts, never content
 // Shows how every school is using the bot. It returns NUMBERS ONLY: no parent names, phone numbers or message text.

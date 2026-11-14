@@ -66,7 +66,7 @@
   }
   const roleLabel = (r) => (r === 'admin' ? 'Administrator' : 'Teacher');
   const NAV = [['compose', 'Compose'], ['messages', 'Messages'], ['replies', 'Replies'], ['history', 'History'], ['parents', 'Parents'], ['settings', 'Settings']];
-  const navItems = () => { const base = S.me && S.me.owner ? [['platform', 'Platform'], ...NAV] : NAV; return S.me && S.me.user.role === 'admin' ? base.flatMap((n) => (n[0] === 'history' ? [n, ['activity', 'Activity']] : [n])) : base; };
+  const navItems = () => { const base = S.me && S.me.owner ? [['platform', 'Platform'], ...NAV] : NAV; return S.me && S.me.user.role === 'admin' ? base.flatMap((n) => (n[0] === 'history' ? [n, ['activity', 'Activity']] : n[0] === 'parents' ? [n, ['days', 'Special days']] : [n])) : base; };
   function renderShell() {
     const m = S.me;
     root.innerHTML = `<div class="shell"><nav class="rail">
@@ -80,7 +80,7 @@
   function paintUnread() { const b = $('[data-v="replies"]'); if (b) b.innerHTML = 'Replies' + (S.unread ? `<span class="badge">${S.unread}</span>` : ''); }
   async function refreshUnread() { try { const d = await api('/replies/summary'); if (d.unread !== S.unread) { S.unread = d.unread; paintUnread(); } } catch { /* the badge stays as it was */ } }
   function renderView() {
-    ({ platform: viewPlatform, compose: viewCompose, messages: viewMessages, replies: viewReplies, history: viewHistory, activity: viewActivity, parents: viewParents, settings: viewSettings })[S.view]();
+    ({ platform: viewPlatform, compose: viewCompose, messages: viewMessages, replies: viewReplies, history: viewHistory, activity: viewActivity, days: viewDays, parents: viewParents, settings: viewSettings })[S.view]();
   }
   const setView = (v) => { S.view = v; clearInterval(S.poll); renderShell(); };
 
@@ -94,6 +94,8 @@
     fees: 'e.g. Second-term balance is N85,000, due Friday 17 October. Pay to the school account or at the bursar\'s office.',
     event: 'e.g. PTA meeting on Saturday 11 October at 10am in the school hall. Please arrive by 9:45am.',
     announcement: 'e.g. School closes for mid-term break on Thursday 23 October and resumes Monday 3 November.',
+    holiday: 'e.g. Merry Christmas! School closes on 18 December and resumes on 6 January.',
+    birthday: 'e.g. Birthday on 15 March (the child\'s name is added for you)',
   };
   // Starter templates: examples to adjust. Anything in [square brackets] must be filled in before drafting.
   const STARTERS = [
@@ -177,8 +179,18 @@
 
   // ---------- replies (what parents write back on WhatsApp)
   async function viewReplies() {
-    const [d, col] = await Promise.all([api('/replies'), api('/colleagues').catch(() => [])]);
-    S.unread = d.unread; paintUnread();
+    const [d, col, tpl] = await Promise.all([api('/replies'), api('/colleagues').catch(() => []), api('/reply-templates').catch(() => [])]);
+    S.unread = d.unread; S.rtpl = tpl; S.replies = d.replies; paintUnread();
+    const qrCard = () => `<div class="card"><h3>Quick replies</h3>
+        <p class="small muted" style="margin:6px 0 10px">Saved answers for what parents write. Pick one under a reply and WhatsApp opens with the text ready to send. These words are filled in for you: <code>{parent}</code> <code>{child}</code> <code>{school}</code> <code>{me}</code> (your name).</p>
+        ${tpl.length ? tpl.map((t) => `<div style="border-top:1px solid #e6e8e1;padding:10px 0"><input id="qt-${t.id}" value="${esc(t.title)}" maxlength="40" aria-label="Name" style="max-width:320px">
+          <textarea id="qb-${t.id}" rows="3" maxlength="1000" aria-label="Reply text" style="margin-top:6px">${esc(t.body)}</textarea>
+          <div class="row" style="margin-top:6px"><button class="btn ghost" data-a="qr-save" data-id="${t.id}">Save</button> <button class="btn danger" data-a="qr-del" data-id="${t.id}">Delete</button></div></div>`).join('')
+          : '<p><button class="btn" data-a="qr-starters">Add example replies</button></p>'}
+        <div style="border-top:1px solid #e6e8e1;padding-top:10px;margin-top:6px"><strong>Add a quick reply</strong>
+          <input id="qtNew" placeholder="Name, for example: Thank you" maxlength="40" aria-label="Name" style="max-width:320px;margin-top:6px">
+          <textarea id="qbNew" rows="3" maxlength="1000" placeholder="Dear {parent}, thank you for your message about {child}. - {school}" aria-label="Reply text" style="margin-top:6px"></textarea>
+          <button class="btn" style="margin-top:6px" data-a="qr-add">Add</button></div></div>`;
     const when = (at) => String(at).slice(0, 16).replace('T', ' ');
     const me = S.me.user.id, f = S.rfilter || 'open';
     const open = d.replies.filter((r) => !r.handled), mine = open.filter((r) => r.assigned_to === me), done = d.replies.filter((r) => r.handled);
@@ -195,9 +207,39 @@
         <div class="row"><a class="btn ghost" href="https://wa.me/${esc(r.phone.replace(/\D/g, ''))}" target="_blank" rel="noopener">Reply on WhatsApp</a>
           ${r.read ? '' : `<button class="btn ghost" data-a="reply-read" data-id="${r.id}">Mark as read</button>`}
           <button class="btn ghost" data-a="reply-handle" data-id="${r.id}" data-h="${r.handled ? 0 : 1}">${r.handled ? 'Open again' : 'Mark handled'}</button>
-          <select class="assign-sel" data-id="${r.id}" aria-label="Give to" style="max-width:200px"><option value="">Not given to anyone</option>${col.map((u) => `<option value="${u.id}" ${r.assigned_to === u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select></div></div>`).join('')
+          <select class="assign-sel" data-id="${r.id}" aria-label="Give to" style="max-width:200px"><option value="">Not given to anyone</option>${col.map((u) => `<option value="${u.id}" ${r.assigned_to === u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select>
+          ${tpl.length ? `<select class="qr-sel" data-id="${r.id}" aria-label="Quick reply" style="max-width:200px"><option value="">Quick reply…</option>${tpl.map((t) => `<option value="${t.id}">${esc(t.title)}</option>`).join('')}</select>` : ''}</div></div>`).join('')
         : d.replies.length ? `<div class="card empty">${f === 'mine' ? 'Nothing is given to you.' : f === 'handled' ? 'No reply is marked handled yet.' : 'Every reply has been handled.'}</div>`
-        : '<div class="card empty">No replies yet. When a parent answers one of your WhatsApp messages, it appears here.</div>'}`;
+        : '<div class="card empty">No replies yet. When a parent answers one of your WhatsApp messages, it appears here.</div>'}
+      ${S.me.user.role === 'admin' ? qrCard() : ''}`;
+  }
+
+  // ---------- special days (administrators): birthdays and holidays, prepared as drafts ahead of time
+  const bdayText = (md) => (/^\d{2}-\d{2}$/.test(md || '') ? md.slice(3) + '/' + md.slice(0, 2) : '');
+  const inDays = (n) => (n === 0 ? 'today' : n === 1 ? 'tomorrow' : n == null ? 'passed' : 'in ' + n + ' days');
+  async function viewDays() {
+    const d = await api('/special-days'); S.dayEditId = 0;
+    const on = d.settings.birthday_msgs, b = d.birthdays;
+    $('#view').innerHTML = `
+      <div class="head"><div><h1>Special days</h1><p class="muted">Birthdays and holidays. The bot prepares drafts a few days ahead and puts them in Messages, under Drafts. <b>It never sends anything by itself:</b> you check them, then send or schedule.</p></div>
+        <div class="row"><button class="btn ghost" data-a="days-run">Check now</button></div></div>
+      <div class="card"><h3>Birthday messages <span class="pill ${on ? 'sent' : 'queued'}">${on ? 'On' : 'Off'}</span></h3>
+        <p class="small muted" style="margin:6px 0 10px"><b>${b.recorded}</b> of <b>${b.total}</b> parents have the child's birthday recorded. Add it in the Birthday column on the Parents page, or in your import file (a column called birthday, written like 15/03).</p>
+        <div class="row"><button class="btn ${on ? 'ghost' : ''}" data-a="bday-toggle">${on ? 'Turn off birthday messages' : 'Turn on birthday messages'}</button>
+          <label>Prepare drafts<select id="aheadSel" style="max-width:130px">${[1, 2, 3, 5, 7, 10, 14].map((n) => `<option value="${n}" ${d.settings.ahead === n ? 'selected' : ''}>${n} day${n === 1 ? '' : 's'} before</option>`).join('')}</select></label>
+          <button class="btn ghost" data-a="ahead-save">Save</button></div>
+        ${b.upcoming.length ? `<p class="small muted" style="margin:12px 0 4px">Birthdays in the next 30 days (${b.upcoming_total})</p>
+          <table><tbody>${b.upcoming.map((c) => `<tr><td>${esc(c.student_name)}</td><td>${esc(c.class_name)}</td><td>${esc(c.birthday)}</td><td class="small muted">${inDays(c.in_days)}</td></tr>`).join('')}</tbody></table>` : ''}</div>
+      <div class="card"><h3>Holidays and special days</h3>
+        <p class="small muted" style="margin:6px 0 10px">Add a date and what the message should say, for example a Christmas greeting with the closing and resuming dates. A draft for every parent is prepared the number of days ahead set above.</p>
+        ${d.days.length ? `<div class="tablewrap"><table><thead><tr><th>Date</th><th>Name</th><th>Message</th><th></th></tr></thead><tbody>${d.days.map((h) => `<tr><td style="white-space:nowrap">${esc(h.day)}${h.yearly ? '<div class="small muted">every year</div>' : ''}<div class="small muted">${inDays(h.in_days)}</div></td><td>${esc(h.title)}</td><td class="small">${esc(h.message)}</td>
+          <td style="text-align:right;white-space:nowrap"><button class="btn ghost" data-a="day-edit" data-id="${h.id}">Edit</button> <button class="btn danger" data-a="day-del" data-id="${h.id}">Delete</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No special days yet.</p>'}
+        <div style="border-top:1px solid #e6e8e1;margin-top:10px;padding-top:10px"><strong id="dFormTitle">Add a special day</strong>
+          <div class="grid" style="margin-top:6px"><label>Name<input id="dTitle" maxlength="60" placeholder="Christmas break"></label><label>Date<input id="dDay" type="date"></label></div>
+          <label style="display:flex;gap:6px;align-items:center;margin:8px 0"><input type="checkbox" id="dYearly" checked style="width:auto"> Every year on this date</label>
+          <label>What the message should say<textarea id="dMsg" rows="3" maxlength="500" placeholder="Merry Christmas! School closes on 18 December and resumes on 6 January."></textarea></label>
+          <button class="btn" id="dSaveBtn" style="margin-top:6px" data-a="day-save">Add</button></div></div>`;
+    S.daysData = d;
   }
 
   // ---------- activity (administrators): who did what
@@ -295,7 +337,7 @@
     endRow();
     return rows;
   }
-  const ALIAS = { student_name: ['student_name', 'student', 'pupil', 'name', 'child'], class_name: ['class_name', 'class', 'grade'], parent_name: ['parent_name', 'parent', 'guardian', 'guardian_name'], phone: ['phone', 'phone_number', 'mobile', 'whatsapp', 'tel'], admission_no: ['admission_no', 'admission_number', 'reg_no', 'admission'], channel: ['channel', 'preferred_channel'], consent: ['consent', 'consent_given', 'agreed'] };
+  const ALIAS = { student_name: ['student_name', 'student', 'pupil', 'name', 'child'], class_name: ['class_name', 'class', 'grade'], parent_name: ['parent_name', 'parent', 'guardian', 'guardian_name'], phone: ['phone', 'phone_number', 'mobile', 'whatsapp', 'tel'], admission_no: ['admission_no', 'admission_number', 'reg_no', 'admission'], birthday: ['birthday', 'dob', 'date_of_birth', 'birth_date', 'date_of_birth_dd_mm'], channel: ['channel', 'preferred_channel'], consent: ['consent', 'consent_given', 'agreed'] };
   function csvToRows(text) {
     const [head, ...body] = parseCSV(text);
     const idx = {};
@@ -516,12 +558,12 @@
         <form id="addForm" class="grid" style="margin-top:12px">
           <label>Student name<input name="student_name" required></label><label>Class<input name="class_name" placeholder="JSS 1A"></label>
           <label>Parent name<input name="parent_name" placeholder="Mrs Okafor"></label><label>Phone<input name="phone" required placeholder="0803 123 4567"></label>
-          <label>Admission no.<input name="admission_no"></label>
+          <label>Admission no.<input name="admission_no"></label><label>Birthday (day/month, optional)<input name="birthday" placeholder="15/03"></label>
           <label>Consent<select name="consent">${consentOptions("")}</select></label>
           <label>Send by<select name="channel"><option value="whatsapp">WhatsApp (SMS if it fails)</option><option value="sms">SMS only</option></select></label>
           <div style="align-self:end"><button class="btn" type="submit">Add parent</button></div></form></div>
       <div class="card"><h3>Import from CSV</h3>
-        <p class="small muted">Columns: student_name, class, parent_name, phone, admission_no, channel, consent (yes or no, optional). <button class="link" data-a="template">Download a template</button></p>
+        <p class="small muted">Columns: student_name, class, parent_name, phone, admission_no, channel, consent (yes or no, optional), birthday (optional, like 15/03). <button class="link" data-a="template">Download a template</button></p>
         <input type="file" id="csv" accept=".csv,text/csv"><div id="importBox"></div></div>
       <div class="card"><h3>Parent consent</h3>
         <p class="small muted" style="margin:6px 0 10px">Consent is recorded for <b>${withConsent}</b> of <b>${totalParents}</b> parents. Note where each parent agreed to receive messages (admission form or verbal). ${S.me.school.require_consent ? 'Messages are only sent to parents with consent recorded.' : 'You can make consent required in Settings.'}</p>
@@ -539,8 +581,9 @@
       <div class="row" style="margin-bottom:10px"><input id="q" placeholder="Search name, class, phone…" value="${esc(q)}" style="max-width:320px">
         ${S.groups.length ? `<select id="grpFilter" aria-label="Show group" style="max-width:220px"><option value="0">All parents</option>${S.groups.map((g) => `<option value="${g.id}" ${S.pgroup === g.id ? 'selected' : ''}>Group: ${esc(g.name)}</option>`).join('')}</select>` : ''}
         ${S.pgroup ? '<button class="btn ghost" data-a="grp-remove">Remove ticked parents from this group</button>' : ''}<span class="muted small">${S.contacts.length} shown</span></div>
-      ${S.contacts.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th style="width:28px"><input type="checkbox" data-a="cpick-all" aria-label="Tick all shown" style="width:auto"></th><th>Student</th><th>Class</th><th>Parent</th><th>Phone</th><th>Channel</th><th>Consent</th><th></th></tr></thead><tbody>
+      ${S.contacts.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th style="width:28px"><input type="checkbox" data-a="cpick-all" aria-label="Tick all shown" style="width:auto"></th><th>Student</th><th>Class</th><th>Parent</th><th>Phone</th><th>Birthday</th><th>Channel</th><th>Consent</th><th></th></tr></thead><tbody>
         ${S.contacts.map((c) => `<tr data-id="${c.id}"><td><input type="checkbox" class="cpick" aria-label="Tick parent" style="width:auto"></td><td>${esc(c.student_name)}<div class="small muted">${esc(c.admission_no)}</div></td><td>${esc(c.class_name)}</td><td>${esc(c.parent_name)}</td><td>+${esc(c.phone)}</td>
+          <td><input class="bday-in" aria-label="Birthday" value="${esc(bdayText(c.birthday))}" placeholder="dd/mm" style="width:84px"></td>
           <td><span class="pill ${c.channel === 'sms' ? 'sms' : 'wa'}">${c.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span>${c.opted_out ? ' <span class="pill failed">opted out</span>' : ''}</td>
           <td><select class="consent-sel" aria-label="Consent">${consentOptions(c.consent_source || '')}</select>${c.consent_at ? `<div class="small muted">${esc(c.consent_at)}</div>` : ''}</td>
           <td style="text-align:right;white-space:nowrap"><button class="btn ghost" data-a="chist">History</button> <button class="btn ghost" data-a="optout">${c.opted_out ? 'Opt in' : 'Opt out'}</button> <button class="btn danger" data-a="delcontact">Delete</button></td></tr>`).join('')}
@@ -744,6 +787,41 @@
       S.welcome = await api('/platform/schools', { method: 'POST', body });
       toast(`School created: ${S.welcome.school.name}`); await viewPlatform();
     }
+    else if (a === 'qr-add') {
+      await api('/reply-templates', { method: 'POST', body: { title: $('#qtNew').value, body: $('#qbNew').value } }); toast('Quick reply added'); await viewReplies();
+    }
+    else if (a === 'qr-save') {
+      await api('/reply-templates/' + el.dataset.id, { method: 'PUT', body: { title: $('#qt-' + el.dataset.id).value, body: $('#qb-' + el.dataset.id).value } }); toast('Saved'); await viewReplies();
+    }
+    else if (a === 'qr-del') {
+      if (!confirm('Delete this quick reply?')) return;
+      await api('/reply-templates/' + el.dataset.id, { method: 'DELETE' }); toast('Deleted'); await viewReplies();
+    }
+    else if (a === 'qr-starters') { await api('/reply-templates/starters', { method: 'POST' }); toast('Example replies added. Change them to suit your school.'); await viewReplies(); }
+    else if (a === 'days-run') {
+      const r = await api('/special-days/run', { method: 'POST' });
+      toast(r.busy ? 'Still checking. Try again in a moment.' : r.messages ? `${r.messages} draft${r.messages === 1 ? '' : 's'} prepared. Open Messages to check them.` : 'Nothing to prepare right now. Drafts appear when a date is close enough.');
+      await refreshCounts(); renderShell();
+    }
+    else if (a === 'bday-toggle') {
+      const on = !S.daysData.settings.birthday_msgs;
+      await api('/special-settings', { method: 'PUT', body: { birthday_msgs: on } }); toast(on ? 'Birthday messages are on' : 'Birthday messages are off'); await viewDays();
+    }
+    else if (a === 'ahead-save') { await api('/special-settings', { method: 'PUT', body: { ahead: +$('#aheadSel').value } }); toast('Saved'); await viewDays(); }
+    else if (a === 'day-edit') {
+      const h = S.daysData.days.find((x) => x.id === +el.dataset.id); if (!h) return;
+      S.dayEditId = h.id; $('#dTitle').value = h.title; $('#dDay').value = h.day; $('#dYearly').checked = !!h.yearly; $('#dMsg').value = h.message;
+      $('#dFormTitle').textContent = 'Change this special day'; $('#dSaveBtn').textContent = 'Save changes'; $('#dTitle').focus && $('#dTitle').focus();
+    }
+    else if (a === 'day-save') {
+      const body = { title: $('#dTitle').value, day: $('#dDay').value, yearly: $('#dYearly').checked, message: $('#dMsg').value };
+      if (S.dayEditId) await api('/special-days/' + S.dayEditId, { method: 'PUT', body }); else await api('/special-days', { method: 'POST', body });
+      toast(S.dayEditId ? 'Saved' : 'Special day added'); await viewDays();
+    }
+    else if (a === 'day-del') {
+      if (!confirm('Delete this special day?')) return;
+      await api('/special-days/' + el.dataset.id, { method: 'DELETE' }); toast('Deleted'); await viewDays();
+    }
     else if (a === 'cls-save') {
       const list = [...document.querySelectorAll('.cls-' + el.dataset.uid)].filter((x) => x.checked).map((x) => x.value);
       await api('/staff-classes/' + el.dataset.uid, { method: 'PUT', body: { classes: list } });
@@ -896,7 +974,7 @@
     else if (a === 'delcontact') { if (confirm('Delete this parent?')) { await api('/contacts/' + rowEl.dataset.id, { method: 'DELETE' }); S.classes = await api('/classes'); viewParents($('#q').value); } }
     else if (a === 'rotate') { if (confirm('The old key stops working immediately. Continue?')) { const r = await api('/school/rotate-key', { method: 'POST' }); S.me.school.api_key = r.api_key; $('#key').textContent = r.api_key; toast('New key generated. Update it in your Class Register.'); } }
     else if (a === 'template') {
-      const blob = new Blob(['student_name,class,parent_name,phone,admission_no,channel,consent\nAdaeze Okafor,JSS 1A,Mrs Okafor,08031234567,SC/001,whatsapp,yes\n'], { type: 'text/csv' });
+      const blob = new Blob(['student_name,class,parent_name,phone,admission_no,channel,consent,birthday\nAdaeze Okafor,JSS 1A,Mrs Okafor,08031234567,SC/001,whatsapp,yes,15/03\n'], { type: 'text/csv' });
       const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'parents-template.csv'; link.click();
     }
   }));
@@ -913,6 +991,22 @@
       return;
     }
     if (e.target.closest('#actUser')) { S.act.user = +e.target.value || 0; await viewActivity(); return; }
+    const bi = e.target.closest('input.bday-in');
+    if (bi) {
+      try { const r = await api('/contacts/' + bi.closest('tr').dataset.id, { method: 'PUT', body: { birthday: bi.value } }); toast(r.birthday ? 'Birthday saved' : 'Birthday cleared'); }
+      catch (err) { toast(err.message, true); }
+      viewParents($('#q').value); return;
+    }
+    const qr = e.target.closest('select.qr-sel');
+    if (qr) {
+      const t = (S.rtpl || []).find((x) => x.id === +qr.value), r = (S.replies || []).find((x) => x.id === +qr.dataset.id); qr.value = '';
+      if (!t || !r) return;
+      const sch = S.me.school, kid = r.students.length ? r.students.map((s) => String(s).split(/\s+/)[0]).join(' and ') : 'your child';
+      const text = t.body.replace(/\{parent\}/gi, r.parent || 'Parent/Guardian').replace(/\{child\}/gi, kid).replace(/\{school\}/gi, sch.signature || sch.name).replace(/\{me\}/gi, S.me.user.name);
+      const w = window.open('https://wa.me/' + String(r.phone).replace(/\D/g, '') + '?text=' + encodeURIComponent(text), '_blank');
+      if (w) w.opener = null; else toast('Your browser blocked the new window. Allow pop-ups for this site and try again.', true);
+      return;
+    }
     const as = e.target.closest('select.assign-sel');
     if (as) {
       const r = await api('/replies/assign', { method: 'POST', body: { id: +as.dataset.id, userId: as.value ? +as.value : null } });

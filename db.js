@@ -163,6 +163,35 @@ if (!hasCol('parent_replies', 'handled_at')) db.exec('ALTER TABLE parent_replies
 if (!hasCol('parent_replies', 'handled_by')) db.exec('ALTER TABLE parent_replies ADD COLUMN handled_by INTEGER');
 if (!hasCol('parent_replies', 'assigned_to')) db.exec('ALTER TABLE parent_replies ADD COLUMN assigned_to INTEGER');
 
+// Quick replies, birthdays and special days. Everything here is ADDED.
+if (!hasCol('contacts', 'birthday')) db.exec('ALTER TABLE contacts ADD COLUMN birthday TEXT');
+if (!hasCol('schools', 'birthday_msgs')) db.exec('ALTER TABLE schools ADD COLUMN birthday_msgs INTEGER NOT NULL DEFAULT 0');
+if (!hasCol('schools', 'special_ahead')) db.exec('ALTER TABLE schools ADD COLUMN special_ahead INTEGER NOT NULL DEFAULT 2');
+db.exec(`CREATE TABLE IF NOT EXISTS reply_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  school_id INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_reply_tpl_school ON reply_templates(school_id)');
+db.exec(`CREATE TABLE IF NOT EXISTS special_days (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  school_id INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  day TEXT NOT NULL,
+  yearly INTEGER NOT NULL DEFAULT 1,
+  message TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_special_school ON special_days(school_id)');
+db.exec(`CREATE TABLE IF NOT EXISTS special_log (
+  school_id INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (school_id, key)
+)`);
+
 // Class limits for teachers, and the parent opt-in link. Everything here is ADDED.
 db.exec(`CREATE TABLE IF NOT EXISTS staff_classes (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

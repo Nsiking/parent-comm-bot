@@ -10,6 +10,8 @@ const KINDS = {
   fees: 'Fees reminder',
   event: 'Event / PTA notice',
   announcement: 'General announcement',
+  holiday: 'Holiday or special day',
+  birthday: 'Birthday wish',
 };
 
 const KIND_GUIDE = {
@@ -21,6 +23,8 @@ const KIND_GUIDE = {
   fees: 'Remind the parent about school fees using only the supplied amounts and dates. Courteous and respectful; never threatening.',
   event: 'Announce the event clearly: what, when, where, and any action needed.',
   announcement: 'Communicate the supplied announcement clearly and briefly.',
+  holiday: 'Send the school\'s greeting or notice for the occasion, using only the supplied facts (for example a holiday greeting, or when school closes and resumes). Warm and brief.',
+  birthday: 'Wish the child a happy birthday on behalf of the school. Warm and brief. Use only the child\'s first name and the supplied date; do not mention age.',
 };
 
 const TONES = { warm: 'warm and caring', formal: 'formal and professional', friendly: 'friendly and conversational', firm: 'polite but firm' };
@@ -42,6 +46,8 @@ function fallbackBody(kind, c, facts, note) {
     fees: `${greet(c)}, a friendly reminder about school fees for ${kid}. ${f} Thank you for your support.`,
     event: `${greet(c)}, ${f}`,
     announcement: `${greet(c)}, ${f}`,
+    holiday: `${greet(c)}, ${f}`,
+    birthday: `${greet(c)}, we wish ${kid} a very happy birthday! May the year ahead be full of joy and good health.`,
   };
   return lines[kind] || `${greet(c)}, ${f}`;
 }
