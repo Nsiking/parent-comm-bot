@@ -61,21 +61,25 @@
   async function refreshCounts() {
     const d = await api('/messages?group=' + S.group);
     S.msgs = d.messages; S.counts = d.counts;
+    try { S.unread = (await api('/replies/summary')).unread; } catch { S.unread = 0; }
   }
   const roleLabel = (r) => (r === 'admin' ? 'Administrator' : 'Teacher');
-  const NAV = [['compose', 'Compose'], ['messages', 'Messages'], ['history', 'History'], ['parents', 'Parents'], ['settings', 'Settings']];
+  const NAV = [['compose', 'Compose'], ['messages', 'Messages'], ['replies', 'Replies'], ['history', 'History'], ['parents', 'Parents'], ['settings', 'Settings']];
   const navItems = () => (S.me && S.me.owner ? [['platform', 'Platform'], ...NAV] : NAV);
   function renderShell() {
     const m = S.me;
     root.innerHTML = `<div class="shell"><nav class="rail">
       <div class="brand">${esc(m.school.name)}<small>Parent Communication Bot</small></div>
-      ${navItems().map(([id, label]) => `<button class="nav ${S.view === id ? 'active' : ''}" data-a="nav" data-v="${id}">${label}${id === 'messages' && S.counts.draft ? `<span class="badge">${S.counts.draft}</span>` : ''}</button>`).join('')}
+      ${navItems().map(([id, label]) => `<button class="nav ${S.view === id ? 'active' : ''}" data-a="nav" data-v="${id}">${label}${id === 'messages' && S.counts.draft ? `<span class="badge">${S.counts.draft}</span>` : ''}${id === 'replies' && S.unread ? `<span class="badge">${S.unread}</span>` : ''}</button>`).join('')}
       <div class="who">${esc(m.user.name)}<br><span style="color:#cfe0da;font-size:12px">${roleLabel(m.user.role)}</span><br><button class="link" style="color:#9db8b0" data-a="logout">Sign out</button></div>
     </nav><main id="view"></main></div>`;
-    renderView();
+    renderView(); refreshUnread();
   }
+  // The Replies badge is drawn with the menu, so it is refreshed separately (without redrawing the screen the person is typing in).
+  function paintUnread() { const b = $('[data-v="replies"]'); if (b) b.innerHTML = 'Replies' + (S.unread ? `<span class="badge">${S.unread}</span>` : ''); }
+  async function refreshUnread() { try { const d = await api('/replies/summary'); if (d.unread !== S.unread) { S.unread = d.unread; paintUnread(); } } catch { /* the badge stays as it was */ } }
   function renderView() {
-    ({ platform: viewPlatform, compose: viewCompose, messages: viewMessages, history: viewHistory, parents: viewParents, settings: viewSettings })[S.view]();
+    ({ platform: viewPlatform, compose: viewCompose, messages: viewMessages, replies: viewReplies, history: viewHistory, parents: viewParents, settings: viewSettings })[S.view]();
   }
   const setView = (v) => { S.view = v; clearInterval(S.poll); renderShell(); };
 
@@ -161,6 +165,22 @@
       S.group = 'draft'; await refreshCounts(); setView('messages');
     } finally { btn.disabled = false; btn.textContent = 'Draft messages'; }
   });
+
+  // ---------- replies (what parents write back on WhatsApp)
+  async function viewReplies() {
+    const d = await api('/replies'); S.unread = d.unread; paintUnread();
+    const when = (at) => String(at).slice(0, 16).replace('T', ' ');
+    $('#view').innerHTML = `
+      <div class="head"><div><h1>Replies</h1><p class="muted">What parents write back on WhatsApp. Replies from numbers that are not in your parent list are not shown.</p></div>
+        ${d.unread ? '<div class="row"><button class="btn ghost" data-a="reply-read-all">Mark all as read</button></div>' : ''}</div>
+      ${d.replies.length ? d.replies.map((r) => `<div class="msg" data-rid="${r.id}">
+        <header><span class="who">${esc(r.parent || 'Parent')} <span class="muted" style="font-weight:400">${r.students.length ? 'for ' + esc(r.students.join(', ')) : ''}${r.classes.length ? ', ' + esc(r.classes.join(', ')) : ''}</span></span>
+          ${r.read ? '' : '<span class="pill sent">New</span>'}<span class="spacer"></span><span class="small muted">${esc(when(r.at))}</span></header>
+        <p style="white-space:pre-wrap;margin:8px 0">${esc(r.text)}</p>
+        <div class="row"><a class="btn ghost" href="https://wa.me/${esc(r.phone.replace(/\D/g, ''))}" target="_blank" rel="noopener">Reply on WhatsApp</a>
+          ${r.read ? '' : `<button class="btn ghost" data-a="reply-read" data-id="${r.id}">Mark as read</button>`}</div></div>`).join('')
+        : '<div class="card empty">No replies yet. When a parent answers one of your WhatsApp messages, it appears here.</div>'}`;
+  }
 
   // ---------- messages
   function smsInfo(text) {
@@ -511,6 +531,8 @@
       const keep = { k: $('#kind').value, t: $('#tone').value, l: $('#language').value, f: $('#facts').value, n: $('#notes')?.value };
       viewCompose(); $('#kind').value = keep.k; $('#tone').value = keep.t; $('#language').value = keep.l; $('#facts').value = keep.f; if ($('#notes')) $('#notes').value = keep.n || ''; $('#kind').dispatchEvent(new Event('change'));
     }
+    else if (a === 'reply-read') { await api('/replies/read', { method: 'POST', body: { ids: [+el.dataset.id] } }); renderShell(); }
+    else if (a === 'reply-read-all') { await api('/replies/read', { method: 'POST', body: { all: true } }); renderShell(); }
     else if (a === 'sms-price') {
       const r = await api('/sms/price', { method: 'PUT', body: { price: $('#smsPrice').value } });
       toast(r.price == null ? 'Price cleared. Counts only.' : 'Price saved'); viewSettings();

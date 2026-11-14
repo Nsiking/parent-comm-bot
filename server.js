@@ -601,6 +601,50 @@ app.get('/webhooks/whatsapp', (req, res) => {
 });
 
 const RANK = { queued: 0, sent: 1, delivered: 2, read: 3 };
+// A parent's WhatsApp reply is kept for every school that has that number in its parent list (numbers nobody knows are dropped).
+const REPLY_KEEP = 500;
+function replyText(msg) {
+  const t = msg.type === 'text' ? msg.text?.body
+    : msg.type === 'button' ? msg.button?.text
+    : msg.type === 'interactive' ? (msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title) : '';
+  const clean = String(t || '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').trim().slice(0, 1000);
+  return clean || `[${String(msg.type || 'message').replace(/[^a-z_]/gi, '').slice(0, 20)} received - open WhatsApp to see it]`;
+}
+function saveReply(msg) {
+  const phone = ch.normalizePhone(msg.from);
+  if (!phone) return;
+  const body = replyText(msg);
+  const waId = msg.id ? String(msg.id).slice(0, 200) : null;
+  for (const { school_id } of db.prepare('SELECT DISTINCT school_id FROM contacts WHERE phone=?').all(phone)) {
+    const r = db.prepare('INSERT OR IGNORE INTO parent_replies(school_id, phone, wa_id, body) VALUES (?,?,?,?)').run(school_id, phone, waId, body);
+    if (r.changes) db.prepare('DELETE FROM parent_replies WHERE school_id=? AND id NOT IN (SELECT id FROM parent_replies WHERE school_id=? ORDER BY id DESC LIMIT ?)').run(school_id, school_id, REPLY_KEEP);
+  }
+}
+app.get('/api/replies/summary', requireAuth, (req, res) => {
+  res.json({ unread: db.prepare('SELECT COUNT(*) n FROM parent_replies WHERE school_id=? AND read_at IS NULL').get(req.user.school_id).n });
+});
+app.get('/api/replies', requireAuth, (req, res) => {
+  const sid = req.user.school_id;
+  const rows = db.prepare("SELECT id, phone, body, datetime(received_at, '+1 hour') AS at_wat, read_at FROM parent_replies WHERE school_id=? ORDER BY id DESC LIMIT 200").all(sid);
+  const who = {};
+  const find = db.prepare('SELECT parent_name, student_name, class_name FROM contacts WHERE school_id=? AND phone=? ORDER BY student_name');
+  const replies = rows.map((r) => {
+    const cs = who[r.phone] || (who[r.phone] = find.all(sid, r.phone));
+    return { id: r.id, phone: r.phone, text: r.body, at: r.at_wat, read: !!r.read_at, parent: (cs.find((c) => c.parent_name) || {}).parent_name || '', students: cs.map((c) => c.student_name), classes: [...new Set(cs.map((c) => c.class_name).filter(Boolean))] };
+  });
+  res.json({ unread: db.prepare('SELECT COUNT(*) n FROM parent_replies WHERE school_id=? AND read_at IS NULL').get(sid).n, replies });
+});
+app.post('/api/replies/read', requireAuth, (req, res) => {
+  const b = req.body || {}, sid = req.user.school_id;
+  if (b.all) db.prepare("UPDATE parent_replies SET read_at=datetime('now') WHERE school_id=? AND read_at IS NULL").run(sid);
+  else {
+    const ids = (Array.isArray(b.ids) ? b.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0).slice(0, 500);
+    if (!ids.length) return res.status(400).json({ error: 'Choose a reply first' });
+    db.prepare(`UPDATE parent_replies SET read_at=datetime('now') WHERE school_id=? AND read_at IS NULL AND id IN (${placeholders(ids.length)})`).run(sid, ...ids);
+  }
+  res.json({ ok: true, unread: db.prepare('SELECT COUNT(*) n FROM parent_replies WHERE school_id=? AND read_at IS NULL').get(sid).n });
+});
+
 app.post('/webhooks/whatsapp', (req, res) => {
   const secret = process.env.WHATSAPP_APP_SECRET;
   if (secret) {
@@ -625,6 +669,7 @@ app.post('/webhooks/whatsapp', (req, res) => {
         const text = String(msg.text?.body || '').trim().toUpperCase();
         if (['STOP', 'UNSUBSCRIBE', 'CANCEL'].includes(text)) db.prepare('UPDATE contacts SET opted_out=1 WHERE phone=?').run(msg.from);
         if (text === 'START') db.prepare('UPDATE contacts SET opted_out=0 WHERE phone=?').run(msg.from);
+        try { saveReply(msg); } catch (e) { console.error('reply not saved', e); }
       }
     }
   } catch (e) { console.error('webhook error', e); }

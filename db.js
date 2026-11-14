@@ -114,6 +114,19 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_templates_school ON message_templates(sc
 // What one SMS part costs this school (naira), typed in by the administrator; empty means "show counts only".
 if (!hasCol('schools', 'sms_price')) db.exec('ALTER TABLE schools ADD COLUMN sms_price REAL');
 
+// Replies parents send back on WhatsApp (new table; nothing existing is changed).
+db.exec(`CREATE TABLE IF NOT EXISTS parent_replies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  school_id INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  phone TEXT NOT NULL,
+  wa_id TEXT,
+  body TEXT NOT NULL,
+  received_at TEXT NOT NULL DEFAULT (datetime('now')),
+  read_at TEXT
+)`);
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_replies_wa ON parent_replies(school_id, wa_id) WHERE wa_id IS NOT NULL');
+db.exec('CREATE INDEX IF NOT EXISTS idx_replies_school ON parent_replies(school_id, id)');
+
 // Anything left "queued" by a crash/restart goes back to draft so nothing is silently lost.
 db.prepare("UPDATE messages SET status='draft' WHERE status='queued'").run();
 
