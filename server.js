@@ -239,6 +239,61 @@ app.post('/api/contacts/consent', requireAuth, requireAdmin, (req, res) => {
   res.json({ updated: r.changes });
 });
 
+// ---------------------------------------------------------------- saved templates
+// A template stores the message type, tone, language and key facts. Everyone at the school sees the same list;
+// the person who saved one, or an administrator, can replace or delete it.
+const TEMPLATE_LIMIT = 50;
+function cleanTemplate(body) {
+  const b = body || {};
+  const title = String(b.title || '').trim().replace(/\s+/g, ' ');
+  const kind = String(b.kind || '');
+  const facts = String(b.facts || '').trim();
+  if (title.length < 2 || title.length > 60) return { error: 'Give the template a name of 2 to 60 characters' };
+  if (!ai.KINDS[kind]) return { error: 'Choose a message type' };
+  if (facts.length > 1500) return { error: 'The key facts are too long (1,500 characters at most)' };
+  if (kind !== 'progress' && kind !== 'absence' && kind !== 'late' && facts.length < 3) return { error: 'Add the key facts before saving a template' };
+  const tone = ai.TONES[b.tone] ? b.tone : '';
+  const language = ai.LANGUAGES.includes(b.language) ? b.language : '';
+  return { title, kind, facts, tone, language };
+}
+const templateRow = (t, user) => ({ id: t.id, title: t.title, kind: t.kind, facts: t.facts, tone: t.tone, language: t.language, by: t.created_by_name, can_change: user.role === 'admin' || t.created_by === user.id });
+function ownTemplate(req, res) {
+  const t = db.prepare('SELECT * FROM message_templates WHERE id=? AND school_id=?').get(+req.params.id, req.user.school_id);
+  if (!t) { res.status(404).json({ error: 'Template not found' }); return null; }
+  if (req.user.role !== 'admin' && t.created_by !== req.user.id) { res.status(403).json({ error: 'Only the person who saved this template, or an administrator, can change it' }); return null; }
+  return t;
+}
+app.get('/api/templates', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM message_templates WHERE school_id=? ORDER BY lower(title), id').all(req.user.school_id);
+  res.json(rows.map((t) => templateRow(t, req.user)));
+});
+app.post('/api/templates', requireAuth, (req, res) => {
+  const c = cleanTemplate(req.body);
+  if (c.error) return res.status(400).json({ error: c.error });
+  const sid = req.user.school_id;
+  if (db.prepare('SELECT COUNT(*) n FROM message_templates WHERE school_id=?').get(sid).n >= TEMPLATE_LIMIT)
+    return res.status(400).json({ error: `Your school already has ${TEMPLATE_LIMIT} saved templates. Delete one you no longer use first` });
+  if (db.prepare('SELECT 1 FROM message_templates WHERE school_id=? AND lower(title)=lower(?)').get(sid, c.title))
+    return res.status(409).json({ error: 'A template with that name already exists' });
+  const id = db.prepare('INSERT INTO message_templates(school_id, title, kind, facts, tone, language, created_by, created_by_name) VALUES (?,?,?,?,?,?,?,?)')
+    .run(sid, c.title, c.kind, c.facts, c.tone, c.language, req.user.id, req.user.name).lastInsertRowid;
+  res.json({ ok: true, template: templateRow(db.prepare('SELECT * FROM message_templates WHERE id=?').get(id), req.user) });
+});
+app.put('/api/templates/:id', requireAuth, (req, res) => {
+  const t = ownTemplate(req, res); if (!t) return;
+  const c = cleanTemplate(req.body);
+  if (c.error) return res.status(400).json({ error: c.error });
+  if (db.prepare('SELECT 1 FROM message_templates WHERE school_id=? AND lower(title)=lower(?) AND id<>?').get(t.school_id, c.title, t.id))
+    return res.status(409).json({ error: 'A template with that name already exists' });
+  db.prepare('UPDATE message_templates SET title=?, kind=?, facts=?, tone=?, language=? WHERE id=?').run(c.title, c.kind, c.facts, c.tone, c.language, t.id);
+  res.json({ ok: true, template: templateRow(db.prepare('SELECT * FROM message_templates WHERE id=?').get(t.id), req.user) });
+});
+app.delete('/api/templates/:id', requireAuth, (req, res) => {
+  const t = ownTemplate(req, res); if (!t) return;
+  db.prepare('DELETE FROM message_templates WHERE id=?').run(t.id);
+  res.json({ ok: true });
+});
+
 // ---------------------------------------------------------------- drafting
 function parseNotes(text, contacts) {
   const notes = {};

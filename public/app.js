@@ -2,7 +2,7 @@
   const $ = (s, r = document) => r.querySelector(s);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const root = $('#root');
-  const S = { me: null, view: 'compose', group: 'draft', classes: [], picked: new Set(['*']), msgs: [], counts: {}, contacts: [], poll: null };
+  const S = { me: null, view: 'compose', group: 'draft', classes: [], picked: new Set(['*']), tpls: [], tplsLoaded: false, msgs: [], counts: {}, contacts: [], poll: null };
 
   async function api(path, opts = {}) {
     const r = await fetch('/api' + path, {
@@ -90,6 +90,28 @@
     event: 'e.g. PTA meeting on Saturday 11 October at 10am in the school hall. Please arrive by 9:45am.',
     announcement: 'e.g. School closes for mid-term break on Thursday 23 October and resumes Monday 3 November.',
   };
+  // Starter templates: examples to adjust. Anything in [square brackets] must be filled in before drafting.
+  const STARTERS = [
+    { title: 'Fee balance reminder', kind: 'fees', facts: "Second-term balance is [amount], due [date]. Pay to the school account or at the bursar's office." },
+    { title: 'PTA meeting', kind: 'event', facts: 'PTA meeting on [day and date] at [time] in the school hall. Please arrive 15 minutes early.' },
+    { title: 'School closing for a break', kind: 'announcement', facts: 'School closes for [name of break] on [date] and resumes on [date].' },
+    { title: 'Homework reminder', kind: 'announcement', facts: 'Homework for [class or subject] is due on [date]. Please make sure your child completes it.' },
+    { title: 'Well done this week', kind: 'commendation', facts: '[what the child did well] this week' },
+    { title: 'End of week progress', kind: 'progress', facts: 'End of week [number]. We covered [topics]. Please encourage [reading or practice] at home.' },
+  ];
+  const tplOptions = () => `<option value="">Choose a template…</option>
+    <optgroup label="Starter templates">${STARTERS.map((t, i) => `<option value="s:${i}">${esc(t.title)}</option>`).join('')}</optgroup>
+    ${S.tpls.length ? `<optgroup label="Saved by your school">${S.tpls.map((t) => `<option value="u:${t.id}">${esc(t.title)}</option>`).join('')}</optgroup>` : ''}`;
+  const chosenTpl = () => {
+    const v = ($('#tplPick') || {}).value || '';
+    if (v.startsWith('s:')) return { starter: true, ...STARTERS[+v.slice(2)] };
+    if (v.startsWith('u:')) return S.tpls.find((t) => t.id === +v.slice(2)) || null;
+    return null;
+  };
+  async function loadTpls(keep) {
+    S.tpls = await api('/templates'); S.tplsLoaded = true;
+    const sel = $('#tplPick'); if (sel) { sel.innerHTML = tplOptions(); if (keep) sel.value = keep; }
+  }
   function viewCompose() {
     const { kinds, tones, languages, school } = S.me;
     const pickedAll = S.picked.has('*');
@@ -106,6 +128,10 @@
           ${S.classes.map((c) => `<button class="chip ${S.picked.has(c.name) ? 'on' : ''}" data-a="pick" data-c="${esc(c.name)}">${esc(c.name || 'No class')} (${reach(c)})</button>`).join('')}
         </div>` : `<p class="muted">No parents yet. <button class="link" data-a="nav" data-v="parents">Add or import parents</button> first.</p>`}
       </div>
+      <div class="card"><h3>Templates</h3>
+        <p class="small muted" style="margin:6px 0 10px">Start from a ready message and change it, or save what you have written below so you and your colleagues can use it again.</p>
+        <div class="row"><select id="tplPick">${tplOptions()}</select><button class="btn ghost" data-a="tpl-use">Use template</button><button class="btn ghost" data-a="tpl-save">Save what I wrote as a template</button><button class="btn ghost" data-a="tpl-del">Delete template</button></div>
+      </div>
       <div class="card">
         <label>Key facts<textarea id="facts" placeholder=""></textarea></label>
         <p class="small muted" id="hint" style="margin:6px 0 0"></p>
@@ -119,8 +145,11 @@
       $('#notesBox').style.display = k === 'progress' ? 'block' : 'none';
     };
     $('#kind').addEventListener('change', sync); sync();
+    if (!S.tplsLoaded) loadTpls().catch(() => {});
   }
   const draft = guard(async () => {
+    const gap = /\[[^\]]*\]/.exec($('#facts').value);
+    if (gap) throw new Error('Fill in the part in square brackets, ' + gap[0] + ', before drafting.');
     const btn = $('#draftBtn'); btn.disabled = true; btn.textContent = 'Drafting…';
     try {
       const d = await api('/drafts', { method: 'POST', body: {
@@ -461,6 +490,27 @@
       else { S.picked.delete('*'); S.picked.has(c) ? S.picked.delete(c) : S.picked.add(c); if (!S.picked.size) S.picked.add('*'); }
       const keep = { k: $('#kind').value, t: $('#tone').value, l: $('#language').value, f: $('#facts').value, n: $('#notes')?.value };
       viewCompose(); $('#kind').value = keep.k; $('#tone').value = keep.t; $('#language').value = keep.l; $('#facts').value = keep.f; if ($('#notes')) $('#notes').value = keep.n || ''; $('#kind').dispatchEvent(new Event('change'));
+    }
+    else if (a === 'tpl-use') {
+      const t = chosenTpl(); if (!t) throw new Error('Choose a template first');
+      $('#kind').value = t.kind; if (t.tone) $('#tone').value = t.tone; if (t.language) $('#language').value = t.language;
+      $('#facts').value = t.facts; $('#kind').dispatchEvent(new Event('change'));
+      toast(t.starter ? 'Template added. Fill in the [brackets], then draft.' : 'Template added. Check it, then draft.');
+    }
+    else if (a === 'tpl-save') {
+      const facts = $('#facts').value.trim(); if (facts.length < 3 && !['progress', 'absence', 'late'].includes($('#kind').value)) throw new Error('Write the key facts first, then save them as a template');
+      const cur = chosenTpl(); const name = prompt('Name this template (for example: Fee reminder, Term 2):', cur ? cur.title : ''); if (name === null || !name.trim()) return;
+      const body = { title: name, kind: $('#kind').value, facts, tone: $('#tone').value, language: $('#language').value };
+      const same = S.tpls.find((t) => t.title.toLowerCase() === name.trim().replace(/\s+/g, ' ').toLowerCase());
+      let r;
+      if (same) { if (!confirm('A template called "' + same.title + '" already exists. Replace it?')) return; r = await api('/templates/' + same.id, { method: 'PUT', body }); }
+      else r = await api('/templates', { method: 'POST', body });
+      await loadTpls('u:' + r.template.id); toast(same ? 'Template replaced' : 'Template saved');
+    }
+    else if (a === 'tpl-del') {
+      const t = chosenTpl(); if (!t || t.starter) throw new Error('Choose one of your saved templates to delete. Starter templates cannot be deleted');
+      if (!confirm('Delete the template "' + t.title + '"?')) return;
+      await api('/templates/' + t.id, { method: 'DELETE' }); await loadTpls(); toast('Template deleted');
     }
     else if (a === 'draft') await draft();
     else if (a === 'group') { S.group = el.dataset.g; await refreshCounts(); viewMessages(); }

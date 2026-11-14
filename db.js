@@ -96,6 +96,21 @@ db.exec(`CREATE TABLE IF NOT EXISTS staff_actions (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 )`);
 
+// Saved message templates, shared by everyone at a school (new table; nothing existing is changed).
+db.exec(`CREATE TABLE IF NOT EXISTS message_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  school_id INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  facts TEXT NOT NULL DEFAULT '',
+  tone TEXT NOT NULL DEFAULT '',
+  language TEXT NOT NULL DEFAULT '',
+  created_by INTEGER,
+  created_by_name TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_templates_school ON message_templates(school_id)');
+
 // Anything left "queued" by a crash/restart goes back to draft so nothing is silently lost.
 db.prepare("UPDATE messages SET status='draft' WHERE status='queued'").run();
 
