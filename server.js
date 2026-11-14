@@ -783,6 +783,61 @@ app.post('/api/platform/teacher/remove', requireAuth, requireAdmin, ownerOnly, (
   res.json({ ok: true });
 });
 
+// ---------------------------------------------------------------- the owner adds a school (account + administrator) from the Platform page
+const TEMP_PW_CHARS = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';   // no look-alikes (0 O 1 l I)
+function makeTempPassword() {
+  for (;;) {
+    let p = '';
+    for (let i = 0; i < 10; i++) p += TEMP_PW_CHARS[crypto.randomInt(TEMP_PW_CHARS.length)];
+    if (/[a-z]/.test(p) && /[A-Z]/.test(p) && /\d/.test(p)) return p;
+  }
+}
+
+app.post('/api/platform/schools', requireAuth, requireAdmin, ownerOnly, (req, res) => {
+  const b = req.body || {};
+  const schoolName = String(b.schoolName || '').trim().replace(/\s+/g, ' ');
+  const adminName = String(b.adminName || '').trim().replace(/\s+/g, ' ');
+  const email = String(b.email || '').trim().toLowerCase();
+  if (!schoolName || schoolName.length > 120) return res.status(400).json({ error: 'Type the school name (up to 120 characters)' });
+  if (!adminName || adminName.length > 120) return res.status(400).json({ error: 'Type the administrator’s name' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Type a valid email address for the administrator' });
+  if (db.prepare('SELECT 1 FROM users WHERE lower(email) = ?').get(email))
+    return res.status(409).json({ error: 'That email already has an account. Use another email, or move or delete the existing account first.' });
+  if (db.prepare('SELECT 1 FROM schools WHERE lower(name) = lower(?)').get(schoolName))
+    return res.status(409).json({ error: 'A school with this name already exists' });
+  let password = String(b.password || '');
+  const generated = !password;
+  if (generated) password = makeTempPassword();
+  else if (password.length < 8) return res.status(400).json({ error: 'The temporary password must have at least 8 characters' });
+  let created;
+  if (!saveStaffChange(res, () => {
+    const sid = Number(db.prepare('INSERT INTO schools(name, api_key, signature) VALUES (?,?,?)').run(schoolName, newKey(), schoolName).lastInsertRowid);
+    db.prepare('INSERT INTO users(school_id, name, email, password_hash, role) VALUES (?,?,?,?,?)').run(sid, adminName, email, hash(password), 'admin');
+    recordStaffAction(req.user, 'school_added', { school_id: sid, name: adminName, email }, schoolName);
+    created = sid;
+  })) return;
+  const address = `${req.protocol}://${req.get('host')}`;
+  const welcome = [
+    `Welcome to the Parent Communication Bot, ${schoolName}!`,
+    '',
+    'Your school’s account is ready.',
+    '',
+    `Open: ${address}`,
+    `Email: ${email}`,
+    `Temporary password: ${password}`,
+    '',
+    'Your first steps:',
+    '1. Sign in. To choose your own password, click “Get a code by email” on the sign-in page.',
+    '2. Click Settings and check your School name, SMS sender ID and Sign-off on messages.',
+    '3. Add your teachers (Settings, Staff accounts), then add your parents (Parents).',
+    '4. Ask us for the user manual if you do not have it yet. Start with the practice day in Chapter 13.',
+    '',
+    'Need help? WhatsApp 0805 480 1320.',
+    'SmartClass AI Academy',
+  ].join('\n');
+  res.json({ ok: true, school: { id: created, name: schoolName }, admin: { name: adminName, email }, password, generated, welcome });
+});
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;

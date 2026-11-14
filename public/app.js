@@ -287,17 +287,29 @@
         <td>${s.failed}</td><td>${s.skipped}</td>
         <td class="small" style="white-space:nowrap">${s.last_message ? esc(String(s.last_message).slice(0, 16)) : '<span class="muted">No messages yet</span>'}</td>
         <td class="small">SMS ID: ${esc(s.sender_id)}<br>School Management: ${s.sm_connected ? 'connected' : 'not connected'}${s.require_consent ? '<br>Consent required' : ''}${s.auto_send_absence ? '<br>Auto-send absence alerts' : ''}</td></tr>`).join('');
+      const welcomeCard = S.welcome ? `<div class="card"><h3>School created: ${esc(S.welcome.school.name)}</h3>
+        <p class="small muted" style="margin:6px 0 10px">Send this message to the administrator. The temporary password is shown only here, so copy the message now.</p>
+        <textarea id="welcomeText" readonly style="min-height:240px">${esc(S.welcome.welcome)}</textarea>
+        <div class="row" style="margin-top:10px"><button class="btn" data-a="copy-welcome">Copy message</button>
+          <a class="btn ghost" href="https://wa.me/?text=${encodeURIComponent(S.welcome.welcome)}" target="_blank" rel="noopener">Send on WhatsApp</a>
+          <span class="spacer"></span><button class="btn ghost" data-a="close-welcome">Done</button></div></div>` : '';
+      const addCard = `<div class="card"><h3>Add a school</h3>
+        <p class="small muted" style="margin:6px 0 10px">Creates the school and its administrator. You then get a welcome message to send them. Leave the password empty and I will make a temporary one.</p>
+        <div class="grid"><label>School name<input id="newSchoolName" maxlength="120"></label><label>Administrator’s name<input id="newAdminName" maxlength="120"></label>
+          <label>Administrator’s email<input id="newAdminEmail" type="email" placeholder="admin@school.com"></label><label>Temporary password (optional)<input id="newAdminPw" autocomplete="off"></label>
+          <div style="align-self:end"><button class="btn" data-a="add-school">Add school</button></div></div></div>`;
       S.fix = null;
       const fixCard = `<div class="card"><h3>Fix a teacher account</h3>
         <p class="small muted" style="margin:6px 0 10px">Type the exact email of a teacher account to move it to another school, or to delete it. Administrator accounts cannot be changed here.</p>
         <div class="row"><input id="fixEmail" type="email" placeholder="teacher@example.com" style="max-width:340px"><button class="btn" data-a="fix-find">Find</button></div><div id="fixResult"></div></div>`;
-      const actionsCard = `<div class="card"><h3>Recent account changes</h3>${d.actions && d.actions.length ? `<table><tbody>${d.actions.map((x) => `<tr><td class="small" style="white-space:nowrap">${esc(String(x.at).slice(0, 16))}</td><td>${x.action === 'removed' ? 'Removed' : 'Moved'} <strong>${esc(x.target_name)}</strong> <span class="muted">${esc(x.target_email)}</span>${x.action === 'removed' ? ` from ${esc(x.school_name || 'a school')}` : ` ${esc(x.detail || '')}`}</td><td class="small muted">by ${esc(x.actor_name)}</td></tr>`).join('')}</tbody></table>` : '<p class="small muted" style="margin:6px 0 0">No changes yet.</p>'}</div>`;
+      const actionsCard = `<div class="card"><h3>Recent account changes</h3>${d.actions && d.actions.length ? `<table><tbody>${d.actions.map((x) => `<tr><td class="small" style="white-space:nowrap">${esc(String(x.at).slice(0, 16))}</td><td>${x.action === 'school_added' ? `Added school <strong>${esc(x.detail || '')}</strong>, administrator <strong>${esc(x.target_name)}</strong> <span class="muted">${esc(x.target_email)}</span>` : `${x.action === 'removed' ? 'Removed' : 'Moved'} <strong>${esc(x.target_name)}</strong> <span class="muted">${esc(x.target_email)}</span>${x.action === 'removed' ? ` from ${esc(x.school_name || 'a school')}` : ` ${esc(x.detail || '')}`}`}</td><td class="small muted">by ${esc(x.actor_name)}</td></tr>`).join('')}</tbody></table>` : '<p class="small muted" style="margin:6px 0 0">No changes yet.</p>'}</div>`;
       $('#view').innerHTML = `
         <div class="head"><div><h1>Platform</h1><p class="muted">How every school uses the bot. It shows counts only, never parents’ names, phone numbers or message text.</p></div>
           <label>Month<input type="month" id="platMonth" value="${esc(d.month)}" style="max-width:190px"></label></div>
+        ${welcomeCard}
         <div class="grid" style="margin-bottom:12px">${tile('Schools', t.schools)}${tile('Parents', t.parents)}${tile('Sent this month', t.sent)}${tile('Failed', t.failed)}${tile('Held back', t.skipped)}</div>
         <p class="small muted" style="margin:0 0 14px">${t.whatsapp} by WhatsApp, ${t.sms} by SMS, ${t.delivered} confirmed delivered. Right now ${t.drafts} drafts and ${t.scheduled} scheduled messages are waiting across all accounts. Sent, Failed and Held back are for the month chosen (Nigerian time).</p>
-        ${d.schools.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>School and administrators</th><th>Teachers</th><th>Parents</th><th>Sent</th><th>Failed</th><th>Held back</th><th>Last message</th><th>Settings</th></tr></thead><tbody>${body}</tbody></table></div>` : '<div class="card empty">No schools yet.</div>'}${fixCard}${actionsCard}`;
+        ${d.schools.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>School and administrators</th><th>Teachers</th><th>Parents</th><th>Sent</th><th>Failed</th><th>Held back</th><th>Last message</th><th>Settings</th></tr></thead><tbody>${body}</tbody></table></div>` : '<div class="card empty">No schools yet.</div>'}${addCard}${fixCard}${actionsCard}`;
     } catch (e) { toast(e.message, true); }
   }
 
@@ -452,6 +464,17 @@
     else if (a === 'hist-csv') {
       const link = document.createElement('a'); link.href = '/api/messages/export.csv?' + histQuery(S.hist.applied); link.download = ''; link.click();
     }
+    else if (a === 'add-school') {
+      const body = { schoolName: $('#newSchoolName').value, adminName: $('#newAdminName').value, email: $('#newAdminEmail').value, password: $('#newAdminPw').value };
+      if (!body.schoolName.trim() || !body.adminName.trim() || !body.email.trim()) return toast('Fill in the school name, the administrator’s name and email', true);
+      S.welcome = await api('/platform/schools', { method: 'POST', body });
+      toast(`School created: ${S.welcome.school.name}`); await viewPlatform();
+    }
+    else if (a === 'copy-welcome') {
+      try { await navigator.clipboard.writeText(S.welcome.welcome); toast('Message copied'); }
+      catch { $('#welcomeText').focus && $('#welcomeText').focus(); toast('Select the message and copy it (Ctrl + C)', true); }
+    }
+    else if (a === 'close-welcome') { S.welcome = null; await viewPlatform(); }
     else if (a === 'rm-teacher') {
       if (!confirm(`Remove ${el.dataset.name} (${el.dataset.email})? They will no longer be able to sign in. Parents and messages are not affected.`)) return;
       await api('/users/' + el.dataset.uid, { method: 'DELETE' });
