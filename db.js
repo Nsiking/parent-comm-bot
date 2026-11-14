@@ -111,6 +111,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS message_templates (
 )`);
 db.exec('CREATE INDEX IF NOT EXISTS idx_templates_school ON message_templates(school_id)');
 
+// What one SMS part costs this school (naira), typed in by the administrator; empty means "show counts only".
+if (!hasCol('schools', 'sms_price')) db.exec('ALTER TABLE schools ADD COLUMN sms_price REAL');
+
 // Anything left "queued" by a crash/restart goes back to draft so nothing is silently lost.
 db.prepare("UPDATE messages SET status='draft' WHERE status='queued'").run();
 

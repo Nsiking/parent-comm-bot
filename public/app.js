@@ -425,6 +425,25 @@
     const admin = user.role === 'admin';
     const users = admin ? await api('/users') : [];
     const smsHook = admin ? await api('/sms-webhook').catch(() => null) : null;
+    const usage = admin ? await api('/sms/usage').catch(() => null) : null;
+    const usageCard = () => {
+      const [cur, prev] = usage.months, price = usage.price;
+      const MN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+      const ml = (m) => MN[+m.slice(5, 7) - 1] + ' ' + m.slice(0, 4);
+      const naira = (n) => '\u20A6' + n.toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+      const row = (label, f) => `<tr><td>${label}</td><td>${f(cur)}</td><td>${f(prev)}</td></tr>`;
+      return `<div class="card"><h3>SMS usage</h3>
+        <p class="small muted" style="margin:6px 0 10px">A long message is sent as several SMS parts, and each part uses credit. This is counted from your sent messages, so check your real balance in your Termii account.</p>
+        <table><thead><tr><th></th><th>${esc(ml(cur.month))}</th><th>${esc(ml(prev.month))}</th></tr></thead><tbody>
+          ${row('SMS messages sent', (u) => u.messages)}${row('SMS parts used', (u) => `<strong>${u.parts}</strong>`)}
+          ${price == null ? '' : row('Estimated cost', (u) => naira(u.parts * price))}
+          ${row('SMS that failed (no credit used)', (u) => u.failed)}${row('Test messages (not really sent)', (u) => u.test)}${row('WhatsApp messages sent', (u) => u.whatsapp)}
+        </tbody></table>
+        ${cur.by_kind.length ? `<p class="small muted" style="margin:12px 0 4px">${esc(ml(cur.month))} by message type</p>
+          <table><tbody>${cur.by_kind.map((k) => `<tr><td>${esc(k.label)}</td><td>${k.messages} messages</td><td>${k.parts} parts</td></tr>`).join('')}</tbody></table>` : ''}
+        <div class="row" style="margin-top:12px"><label>Price of one SMS part (naira, optional)<input id="smsPrice" inputmode="decimal" value="${price == null ? '' : price}" placeholder="for example 4"></label><button class="btn ghost" data-a="sms-price">Save price</button></div>
+        <p class="small muted" style="margin:6px 0 0">Leave it empty to show counts only. Use the price in your Termii account; it can change.</p></div>`;
+    };
     const staffMsg = S.staffMsg ? `<div style="border:1px solid #d8ddd4;border-radius:10px;padding:12px;margin:8px 0 14px"><strong>${esc(S.staffMsg.title)}</strong>
         <p class="small muted" style="margin:4px 0 8px">${esc(S.staffMsg.note)}</p>
         <textarea id="staffMsgText" readonly style="min-height:200px">${esc(S.staffMsg.text)}</textarea>
@@ -437,6 +456,7 @@
       <div class="card"><h3>Connections</h3>
         <p style="margin:10px 0 4px">AI drafting ${pv(providers.ai)} &nbsp; SMS (Termii) ${pv(providers.sms)} &nbsp; WhatsApp ${pv(providers.whatsapp)}</p>
         <p class="small muted" style="margin:0">Dry-run means messages are logged on the server but not delivered. Add the API keys in the server environment to go live.</p></div>
+      ${usage ? usageCard() : ''}
       ${smsHook ? `<div class="card"><h3>SMS delivery reports</h3>
         <p class="small muted" style="margin:6px 0 10px">So that SMS messages change from Sent to Delivered (or Failed, with the reason), tell Termii where to send its delivery reports: in your Termii account, open the webhook settings and paste this address. Keep it private.</p>
         <p><code id="smsHookUrl">${esc(smsHook.url)}</code></p>
@@ -490,6 +510,10 @@
       else { S.picked.delete('*'); S.picked.has(c) ? S.picked.delete(c) : S.picked.add(c); if (!S.picked.size) S.picked.add('*'); }
       const keep = { k: $('#kind').value, t: $('#tone').value, l: $('#language').value, f: $('#facts').value, n: $('#notes')?.value };
       viewCompose(); $('#kind').value = keep.k; $('#tone').value = keep.t; $('#language').value = keep.l; $('#facts').value = keep.f; if ($('#notes')) $('#notes').value = keep.n || ''; $('#kind').dispatchEvent(new Event('change'));
+    }
+    else if (a === 'sms-price') {
+      const r = await api('/sms/price', { method: 'PUT', body: { price: $('#smsPrice').value } });
+      toast(r.price == null ? 'Price cleared. Counts only.' : 'Price saved'); viewSettings();
     }
     else if (a === 'tpl-use') {
       const t = chosenTpl(); if (!t) throw new Error('Choose a template first');

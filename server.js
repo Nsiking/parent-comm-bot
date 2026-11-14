@@ -239,6 +239,42 @@ app.post('/api/contacts/consent', requireAuth, requireAdmin, (req, res) => {
   res.json({ updated: r.changes });
 });
 
+// ---------------------------------------------------------------- SMS usage
+// Counts come from the message records already kept. A long SMS is sent in several parts, and each part is charged.
+// Messages sent while SMS was in test (dry-run) mode carry a "mock-" id and are listed apart, because nothing really went out.
+const monthBefore = (m) => { const d = new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7) - 2, 1)); return d.toISOString().slice(0, 7); };
+function smsUsage(schoolId, month) {
+  const rows = db.prepare(`SELECT m.status AS status, m.channel AS channel, m.body AS body, m.provider_id AS provider_id, ${KIND_SQL} AS kind
+    ${HISTORY_FROM} WHERE m.school_id=? AND m.status IN ('queued','sent','delivered','read','failed') AND strftime('%Y-%m', ${WHEN_SQL}) = ?`).all(schoolId, month);
+  const u = { month, messages: 0, parts: 0, failed: 0, test: 0, whatsapp: 0, by_kind: [] };
+  const kinds = {};
+  for (const r of rows) {
+    if (r.channel !== 'sms') { if (r.status !== 'failed' && !String(r.provider_id || '').startsWith('mock-')) u.whatsapp += 1; continue; }
+    if (r.status === 'failed') { u.failed += 1; continue; }
+    if (String(r.provider_id || '').startsWith('mock-')) { u.test += 1; continue; }
+    const parts = ch.smsSegments(ch.sanitizeSms(r.body || '')).segments;
+    u.messages += 1; u.parts += parts;
+    const k = kinds[r.kind || ''] || (kinds[r.kind || ''] = { label: ai.KINDS[r.kind] || 'Other', messages: 0, parts: 0 });
+    k.messages += 1; k.parts += parts;
+  }
+  u.by_kind = Object.values(kinds).sort((a, b) => b.parts - a.parts || a.label.localeCompare(b.label));
+  return u;
+}
+app.get('/api/sms/usage', requireAuth, requireAdmin, (req, res) => {
+  const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(String(req.query.month || '')) ? String(req.query.month) : new Date(Date.now() + 3600e3).toISOString().slice(0, 7);
+  const price = db.prepare('SELECT sms_price FROM schools WHERE id=?').get(req.user.school_id).sms_price;
+  res.json({ price: price == null ? null : price, months: [smsUsage(req.user.school_id, month), smsUsage(req.user.school_id, monthBefore(month))] });
+});
+app.put('/api/sms/price', requireAuth, requireAdmin, (req, res) => {
+  const raw = String((req.body || {}).price ?? '').trim().replace(/^[₦N]\s*/i, '').replace(/,/g, '');
+  if (raw === '') { db.prepare('UPDATE schools SET sms_price=NULL WHERE id=?').run(req.user.school_id); return res.json({ ok: true, price: null }); }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1000) return res.status(400).json({ error: 'Enter the price as a number, for example 4 or 4.5' });
+  const price = Math.round(n * 100) / 100;
+  db.prepare('UPDATE schools SET sms_price=? WHERE id=?').run(price, req.user.school_id);
+  res.json({ ok: true, price });
+});
+
 // ---------------------------------------------------------------- saved templates
 // A template stores the message type, tone, language and key facts. Everyone at the school sees the same list;
 // the person who saved one, or an administrator, can replace or delete it.
