@@ -240,6 +240,60 @@ app.post('/api/contacts/import', requireAuth, (req, res) => {
   res.json({ added, updated, skipped });
 });
 
+// Check a file BEFORE importing it: nothing is saved. Shows what would be added or updated, which rows have problems, and classes that look like typos.
+const classKey = (s) => String(s || '').toLowerCase().replace(/[\s\-_.]/g, '');
+app.post('/api/contacts/import-check', requireAuth, (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (!rows.length) return res.status(400).json({ error: 'No rows to import' });
+  if (rows.length > 2000) return res.status(400).json({ error: 'Import up to 2,000 rows at a time' });
+  const sid = req.user.school_id;
+  const find = db.prepare('SELECT id FROM contacts WHERE school_id=? AND phone=? AND lower(student_name)=lower(?)');
+  const existing = new Set(db.prepare('SELECT DISTINCT class_name FROM contacts WHERE school_id=? AND class_name<>\'\'').all(sid).map((r) => r.class_name));
+  const seen = new Map(), phoneKids = new Map(), classCount = new Map();
+  const skipped = [], repeated = [], noClass = [];
+  let add = 0, update = 0;
+  rows.forEach((r, i) => {
+    const row = i + 2, c = cleanContact(r);
+    if (c.error) return skipped.push({ row, reason: c.error });
+    const key = `${c.phone}|${c.student_name.toLowerCase()}`;
+    if (seen.has(key)) repeated.push({ row, first: seen.get(key), student: c.student_name });
+    else { seen.set(key, row); if (find.get(sid, c.phone, c.student_name)) update++; else add++; }
+    if (!c.class_name) noClass.push({ row, student: c.student_name });
+    else classCount.set(c.class_name, (classCount.get(c.class_name) || 0) + 1);
+    if (!phoneKids.has(c.phone)) phoneKids.set(c.phone, new Set());
+    phoneKids.get(c.phone).add(c.student_name.toLowerCase());
+  });
+  const byKey = new Map();
+  for (const n of [...existing, ...classCount.keys()]) { const k = classKey(n); if (!byKey.has(k)) byKey.set(k, new Set()); byKey.get(k).add(n); }
+  const classes = [...classCount.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([name, count]) => ({
+    name, count, isNew: existing.size > 0 && !existing.has(name),
+    similar: [...byKey.get(classKey(name))].filter((x) => x !== name),
+  }));
+  res.json({
+    total: rows.length, add, update,
+    skippedTotal: skipped.length, skipped: skipped.slice(0, 20),
+    repeatedTotal: repeated.length, repeated: repeated.slice(0, 20),
+    noClassTotal: noClass.length, noClass: noClass.slice(0, 20),
+    sharedPhones: [...phoneKids.values()].filter((s) => s.size > 1).length,
+    classes,
+  });
+});
+
+// Everything sent to one parent (and what they wrote back), newest first.
+app.get('/api/contacts/:id/history', requireAuth, (req, res) => {
+  const sid = req.user.school_id;
+  const c = db.prepare('SELECT * FROM contacts WHERE id=? AND school_id=?').get(req.params.id, sid);
+  if (!c) return res.status(404).json({ error: 'Parent not found' });
+  const messages = db.prepare(`SELECT m.id, ${WHEN_SQL} AS at, m.status, m.channel, m.body, m.error, ${KIND_SQL} AS kind
+    ${HISTORY_FROM} WHERE m.school_id=? AND m.contact_id=? ORDER BY COALESCE(m.sent_at, m.created_at) DESC, m.id DESC LIMIT 100`).all(sid, c.id);
+  const replies = db.prepare("SELECT id, body, datetime(received_at, '+1 hour') AS at FROM parent_replies WHERE school_id=? AND phone=? ORDER BY id DESC LIMIT 50").all(sid, c.phone);
+  const groups = db.prepare('SELECT g.name FROM parent_group_members mm JOIN parent_groups g ON g.id=mm.group_id WHERE mm.contact_id=? AND g.school_id=? ORDER BY lower(g.name)').all(c.id, sid).map((g) => g.name);
+  res.json({
+    contact: { id: c.id, student_name: c.student_name, class_name: c.class_name, parent_name: c.parent_name, phone: c.phone, channel: c.channel, opted_out: c.opted_out, consent_at: c.consent_at, consent_source: c.consent_source },
+    groups, messages, replies,
+  });
+});
+
 // Record consent for many parents at once (admin only). Only parents with no record yet are changed.
 app.post('/api/contacts/consent', requireAuth, requireAdmin, (req, res) => {
   const b = req.body || {};
@@ -663,6 +717,43 @@ app.get('/api/messages/summary', requireAuth, (req, res) => {
   }
   const order = (map) => Object.values(map).sort((a, b) => (b.sent + b.failed + b.skipped + b.draft + b.scheduled) - (a.sent + a.failed + a.skipped + a.draft + a.scheduled) || a.label.localeCompare(b.label));
   res.json({ month, totals, by_kind: order(byKind), by_class: order(byClass) });
+});
+
+// Delivery report: for each batch of messages, what happened to them.
+app.get('/api/batches', requireAuth, (req, res) => {
+  const rows = db.prepare(`SELECT b.id, b.kind, datetime(b.created_at, '+1 hour') AS at, u.name AS by_name,
+      COUNT(m.id) AS total,
+      SUM(m.status IN ('queued','sent','delivered','read')) AS sent,
+      SUM(m.status IN ('delivered','read')) AS delivered,
+      SUM(m.status='failed') AS failed, SUM(m.status='skipped') AS skipped,
+      SUM(m.status IN ('draft','scheduled')) AS waiting
+    FROM batches b LEFT JOIN users u ON u.id=b.created_by LEFT JOIN messages m ON m.batch_id=b.id AND m.school_id=b.school_id
+    WHERE b.school_id=? GROUP BY b.id HAVING COUNT(m.id) > 0 ORDER BY b.id DESC LIMIT 30`).all(req.user.school_id);
+  res.json(rows.map((r) => ({ ...r, kind_label: ai.KINDS[r.kind] || 'Other' })));
+});
+
+app.get('/api/batches/:id', requireAuth, (req, res) => {
+  const sid = req.user.school_id;
+  const b = db.prepare('SELECT id FROM batches WHERE id=? AND school_id=?').get(req.params.id, sid);
+  if (!b) return res.status(404).json({ error: 'Batch not found' });
+  const problems = db.prepare(`SELECT m.id, m.status, m.phone, m.channel, m.error, c.parent_name, c.student_name, c.class_name
+    FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id WHERE m.school_id=? AND m.batch_id=? AND m.status IN ('failed','skipped')
+    ORDER BY m.id LIMIT 200`).all(sid, b.id);
+  res.json({ id: b.id, problems });
+});
+
+// Send again the messages of one batch that failed (held-back ones return to Drafts by themselves once consent is recorded).
+app.post('/api/batches/:id/retry', requireAuth, (req, res) => {
+  const sid = req.user.school_id;
+  const b = db.prepare('SELECT id FROM batches WHERE id=? AND school_id=?').get(req.params.id, sid);
+  if (!b) return res.status(404).json({ error: 'Batch not found' });
+  const sch = schoolRow(sid);
+  if (sch.require_approval && req.user.role !== 'admin')
+    return res.status(403).json({ error: 'Your school needs an administrator to approve messages before they are sent. Ask an administrator to retry these.' });
+  if (quietNow(sch)) return res.status(409).json({ error: quietText(sch) });
+  const ids = db.prepare("SELECT id FROM messages WHERE school_id=? AND batch_id=? AND status='failed'").all(sid, b.id).map((r) => r.id);
+  if (!ids.length) return res.status(400).json({ error: 'Nothing failed in this batch' });
+  res.json(queueAndSend(sid, ids));
 });
 
 app.get('/api/stats', requireAuth, (req, res) => {

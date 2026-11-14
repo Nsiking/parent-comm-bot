@@ -313,6 +313,23 @@
       <td><div class="small" title="${esc(m.body)}">${esc(m.body.length > 120 ? m.body.slice(0, 120) + '…' : m.body)}</div>${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}</td></tr>`).join('');
   const histBreakdown = (title, list) => `<div><h3>${title}</h3>${list.length ? `<div class="tablewrap"><table><thead><tr><th></th><th>Sent</th><th>Failed</th><th>Held back</th><th>Drafts</th><th>Scheduled</th></tr></thead><tbody>
       ${list.map((e) => `<tr><td>${esc(e.label)}</td><td>${e.sent}</td><td>${e.failed}</td><td>${e.skipped}</td><td>${e.draft}</td><td>${e.scheduled}</td></tr>`).join('')}</tbody></table></div>` : '<p class="small muted">No messages in this month.</p>'}</div>`;
+  // Delivery by batch: what happened to each group of messages, with the failed ones listed and a button to send them again.
+  function batchCard(h) {
+    const list = h.batches || [];
+    if (!list.length) return '';
+    const canRetry = !(S.me.school.require_approval && S.me.user.role !== 'admin');
+    const rows = list.map((b) => {
+      const open = h.openId === b.id && h.detail;
+      return `<tr><td class="small" style="white-space:nowrap">${esc(String(b.at).slice(0, 16))}</td><td>${esc(b.kind_label)}<div class="small muted">${esc(b.by_name || '')}</div></td>
+        <td>${b.total}</td><td>${b.sent}</td><td>${b.delivered}</td><td>${b.failed ? `<b style="color:#b42318">${b.failed}</b>` : 0}</td><td>${b.skipped}</td><td>${b.waiting}</td>
+        <td style="text-align:right">${b.failed || b.skipped ? `<button class="btn ghost" data-a="batch-open" data-id="${b.id}">${open ? 'Hide' : 'Details'}</button>` : ''}</td></tr>
+        ${open ? `<tr><td colspan="9" style="background:#faf7ee">${h.detail.problems.map((p) => `<div class="small" style="margin:3px 0"><span class="pill ${p.status === 'failed' ? 'failed' : 'queued'}">${p.status === 'failed' ? 'Failed' : 'Held back'}</span> ${esc(p.parent_name || 'Parent')} for ${esc(p.student_name || '')}${p.class_name ? ', ' + esc(p.class_name) : ''} · +${esc(p.phone)}<div class="muted">${esc(p.error || '')}</div></div>`).join('')}
+          ${b.failed ? (canRetry ? `<button class="btn" style="margin-top:8px" data-a="batch-retry" data-id="${b.id}">Send the ${b.failed} failed again</button>` : '<p class="small muted">Ask an administrator to send these again.</p>') : ''}</td></tr>` : ''}`;
+    }).join('');
+    return `<div class="card"><h3>Delivery by batch</h3>
+      <p class="small muted" style="margin:6px 0 10px">The last ${list.length} batches. <b>Sent</b> includes messages confirmed <b>Delivered</b>. <b>Held back</b> means the parent opted out or has no consent recorded. Automatic absence and late alerts are not part of a batch.</p>
+      <div class="tablewrap"><table><thead><tr><th>When</th><th>Type</th><th>Total</th><th>Sent</th><th>Delivered</th><th>Failed</th><th>Held back</th><th>Waiting</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }
   function renderHistory() {
     const h = S.hist, f = h.applied, t = h.sum.totals;
     const sel = (cur, v, l) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`;
@@ -324,6 +341,7 @@
         <div class="grid" style="margin-top:12px">${tile('Sent', t.sent)}${tile('Failed', t.failed)}${tile('Held back', t.skipped)}${tile('Drafts waiting', t.draft)}${tile('Scheduled', t.scheduled)}</div>
         <p class="small muted" style="margin:10px 0 14px">${t.whatsapp} by WhatsApp, ${t.sms} by SMS. ${t.delivered} confirmed delivered (WhatsApp, and SMS once delivery reports are connected in Settings). Held back means the parent opted out or has no consent recorded.</p>
         <div class="grid">${histBreakdown('By type', h.sum.by_kind)}${histBreakdown('By class', h.sum.by_class)}</div></div>
+ ${batchCard(h)}
       <div class="card"><div class="grid">
         <label>Search<input id="hq" value="${esc(f.q)}" placeholder="Parent, student, class or phone"></label>
         <label>Status<select id="hstatus">${sel(f.status, '', 'All')}${sel(f.status, 'sent', 'Sent')}${sel(f.status, 'failed', 'Failed')}${sel(f.status, 'skipped', 'Held back')}${sel(f.status, 'draft', 'Drafts')}${sel(f.status, 'scheduled', 'Scheduled')}</select></label>
@@ -337,8 +355,8 @@
   async function viewHistory() {
     try {
       const h = (S.hist = S.hist || { month: todayLocal().slice(0, 7), applied: { q: '', status: '', kind: '', from: '', to: '' }, rows: [], total: 0, sum: null });
-      const [sum, list] = await Promise.all([api('/messages/summary?month=' + h.month), api('/messages/history?' + histQuery(h.applied, { limit: 100, offset: 0 }))]);
-      h.sum = sum; h.rows = list.rows; h.total = list.total;
+      const [sum, list, batches] = await Promise.all([api('/messages/summary?month=' + h.month), api('/messages/history?' + histQuery(h.applied, { limit: 100, offset: 0 })), api('/batches').catch(() => [])]);
+      h.sum = sum; h.rows = list.rows; h.total = list.total; h.batches = batches;
       renderHistory();
     } catch (e) { toast(e.message, true); }
   }
@@ -417,6 +435,37 @@
   const consentOptions = (sel) => `<option value="">Not recorded</option>${CONSENT_OPTS.map(([v, l]) => `<option value="${v}" ${sel === v ? 'selected' : ''}>${l}</option>`).join('')}${sel === 'imported' ? '<option value="imported" selected>Imported list</option>' : ''}`;
   const todayLocal = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 
+  // ---------- import check (what a CSV file would do, before anything is saved)
+  function importPreview(r) {
+    const n = r.add + r.update;
+    const list = (items, fn) => `<ul class="small" style="margin:4px 0 0 18px">${items.map((x) => `<li>${fn(x)}</li>`).join('')}</ul>`;
+    const more = (total, shown) => (total > shown ? `<div class="small muted">…and ${total - shown} more.</div>` : '');
+    return `<div class="card" style="margin-top:12px;border:2px solid #f4b400"><h3>Check before importing</h3>
+      <p style="margin:8px 0"><b>${r.total}</b> rows in the file: <b>${r.add}</b> new parent${r.add === 1 ? '' : 's'}, <b>${r.update}</b> already in your list (updated)${r.repeatedTotal ? `, <b>${r.repeatedTotal}</b> repeated` : ''}, <b>${r.skippedTotal}</b> with a problem (left out).</p>
+      ${r.skippedTotal ? `<p class="small" style="margin:8px 0 0"><b>Left out, fix these rows in your file:</b></p>${list(r.skipped, (x) => `Row ${x.row}: ${esc(x.reason)}`)}${more(r.skippedTotal, r.skipped.length)}` : ''}
+      ${r.noClassTotal ? `<p class="small" style="margin:10px 0 0"><b>${r.noClassTotal} row${r.noClassTotal === 1 ? ' has' : 's have'} no class.</b> They will be imported, but Compose can only reach them through "Whole school".</p>${list(r.noClass, (x) => `Row ${x.row}: ${esc(x.student)}`)}${more(r.noClassTotal, r.noClass.length)}` : ''}
+      ${r.repeatedTotal ? `<p class="small" style="margin:10px 0 0"><b>${r.repeatedTotal} row${r.repeatedTotal === 1 ? ' repeats' : 's repeat'} an earlier row</b> (same child and phone). They are not counted twice, and the later row's details win.</p>${list(r.repeated, (x) => `Row ${x.row} repeats row ${x.first} (${esc(x.student)})`)}${more(r.repeatedTotal, r.repeated.length)}` : ''}
+      ${r.sharedPhones ? `<p class="small muted" style="margin:10px 0 0">${r.sharedPhones} phone number${r.sharedPhones === 1 ? ' is' : 's are'} used for more than one child (brothers and sisters). That is normal.</p>` : ''}
+      <p class="small" style="margin:10px 0 4px"><b>Classes in the file</b></p>
+      <div class="chips">${r.classes.map((c) => `<span class="chip">${esc(c.name)} (${c.count})${c.isNew ? ' <span class="pill queued">new class</span>' : ''}${c.similar.length ? ` <span class="pill failed">looks like ${esc(c.similar.join(', '))}</span>` : ''}</span>`).join('') || '<span class="muted small">None</span>'}</div>
+      ${r.classes.some((c) => c.similar.length) ? '<p class="small muted" style="margin:6px 0 0">A class that "looks like" another may be a typing difference (for example JSS1A and JSS 1A). Correct the file if so, so one class does not become two.</p>' : ''}
+      <div class="row" style="margin-top:14px">${n ? `<button class="btn" data-a="import-go">Import ${n} parent${n === 1 ? '' : 's'}</button>` : ''}<button class="btn ghost" data-a="import-cancel">${n ? 'Cancel' : 'Close'}</button></div></div>`;
+  }
+
+  // ---------- history of one parent
+  function parentHistory(d) {
+    const c = d.contact, items = [
+      ...d.messages.map((m) => ({ at: m.at, t: 'm', m })),
+      ...d.replies.map((r) => ({ at: r.at, t: 'r', r })),
+    ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+    return `<div class="card" style="border:2px solid #f4b400"><div class="row"><h3>${esc(c.student_name)}${c.class_name ? ', ' + esc(c.class_name) : ''}</h3><span class="spacer"></span><button class="btn ghost" data-a="chist-close">Close</button></div>
+      <p class="small muted" style="margin:6px 0 8px">${esc(c.parent_name || 'Parent')} · +${esc(c.phone)} · ${c.channel === 'sms' ? 'SMS' : 'WhatsApp'}${c.opted_out ? ' · opted out' : ''}${c.consent_at ? ' · consent recorded ' + esc(c.consent_at) : ' · no consent recorded'}${d.groups.length ? ' · groups: ' + esc(d.groups.join(', ')) : ''}</p>
+      ${items.length ? items.map((x) => x.t === 'm'
+        ? `<div class="msg"><header><span class="pill ${x.m.channel === 'sms' ? 'sms' : 'wa'}">${x.m.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span><span class="pill ${x.m.status === 'scheduled' ? 'queued' : x.m.status}">${esc(x.m.status)}</span>${x.m.kind && S.me.kinds[x.m.kind] ? `<span class="pill">${esc(S.me.kinds[x.m.kind])}</span>` : ''}<span class="spacer"></span><span class="small muted">${esc(String(x.at).slice(0, 16))}</span></header><div style="white-space:pre-wrap">${esc(x.m.body)}</div>${x.m.error ? `<div class="small muted" style="margin-top:6px">${esc(x.m.error)}</div>` : ''}</div>`
+        : `<div class="msg" style="border-left:4px solid #f4b400"><header><span class="pill sent">Parent replied</span><span class="spacer"></span><span class="small muted">${esc(String(x.at).slice(0, 16))}</span></header><div style="white-space:pre-wrap">${esc(x.r.body)}</div></div>`).join('')
+        : '<p class="muted">Nothing has been sent to this parent yet.</p>'}</div>`;
+  }
+
   async function viewParents(q = '') {
     S.groups = await api('/groups');
     if (S.pgroup && !S.groups.some((g) => g.id === S.pgroup)) S.pgroup = 0;
@@ -435,7 +484,7 @@
           <div style="align-self:end"><button class="btn" type="submit">Add parent</button></div></form></div>
       <div class="card"><h3>Import from CSV</h3>
         <p class="small muted">Columns: student_name, class, parent_name, phone, admission_no, channel, consent (yes or no, optional). <button class="link" data-a="template">Download a template</button></p>
-        <input type="file" id="csv" accept=".csv,text/csv"></div>
+        <input type="file" id="csv" accept=".csv,text/csv"><div id="importBox"></div></div>
       <div class="card"><h3>Parent consent</h3>
         <p class="small muted" style="margin:6px 0 10px">Consent is recorded for <b>${withConsent}</b> of <b>${totalParents}</b> parents. Note where each parent agreed to receive messages (admission form or verbal). ${S.me.school.require_consent ? 'Messages are only sent to parents with consent recorded.' : 'You can make consent required in Settings.'}</p>
         ${S.me.user.role === 'admin' ? `<div class="grid"><label>Class<select id="bkClass"><option value="*">All classes</option>${S.classes.map((c) => `<option value="${esc(c.name)}">${esc(c.name || 'No class')}</option>`).join('')}</select></label>
@@ -448,6 +497,7 @@
         <div class="row"><select id="grpSel" aria-label="Group"><option value="">Choose a group…</option>${S.groups.map((g) => `<option value="${g.id}">${esc(g.name)} (${g.total})</option>`).join('')}</select>
           <input id="grpName" placeholder="or type a new group name" maxlength="40" style="max-width:240px"><button class="btn" data-a="grp-add">Add ticked parents to group</button></div>
         ${S.groups.length ? `<div class="chips" style="margin-top:12px">${S.groups.map((g) => `<span class="chip" data-gid="${g.id}">${esc(g.name)} (${g.total}) <button class="link" data-a="grp-del" data-id="${g.id}" aria-label="Delete group ${esc(g.name)}">Delete</button></span>`).join('')}</div>` : ''}</div>
+      <div id="chistBox"></div>
       <div class="row" style="margin-bottom:10px"><input id="q" placeholder="Search name, class, phone…" value="${esc(q)}" style="max-width:320px">
         ${S.groups.length ? `<select id="grpFilter" aria-label="Show group" style="max-width:220px"><option value="0">All parents</option>${S.groups.map((g) => `<option value="${g.id}" ${S.pgroup === g.id ? 'selected' : ''}>Group: ${esc(g.name)}</option>`).join('')}</select>` : ''}
         ${S.pgroup ? '<button class="btn ghost" data-a="grp-remove">Remove ticked parents from this group</button>' : ''}<span class="muted small">${S.contacts.length} shown</span></div>
@@ -455,7 +505,7 @@
         ${S.contacts.map((c) => `<tr data-id="${c.id}"><td><input type="checkbox" class="cpick" aria-label="Tick parent" style="width:auto"></td><td>${esc(c.student_name)}<div class="small muted">${esc(c.admission_no)}</div></td><td>${esc(c.class_name)}</td><td>${esc(c.parent_name)}</td><td>+${esc(c.phone)}</td>
           <td><span class="pill ${c.channel === 'sms' ? 'sms' : 'wa'}">${c.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span>${c.opted_out ? ' <span class="pill failed">opted out</span>' : ''}</td>
           <td><select class="consent-sel" aria-label="Consent">${consentOptions(c.consent_source || '')}</select>${c.consent_at ? `<div class="small muted">${esc(c.consent_at)}</div>` : ''}</td>
-          <td style="text-align:right;white-space:nowrap"><button class="btn ghost" data-a="optout">${c.opted_out ? 'Opt in' : 'Opt out'}</button> <button class="btn danger" data-a="delcontact">Delete</button></td></tr>`).join('')}
+          <td style="text-align:right;white-space:nowrap"><button class="btn ghost" data-a="chist">History</button> <button class="btn ghost" data-a="optout">${c.opted_out ? 'Opt in' : 'Opt out'}</button> <button class="btn danger" data-a="delcontact">Delete</button></td></tr>`).join('')}
         </tbody></table></div>` : `<div class="card empty">No parents found.</div>`}`;
     $('#addForm').addEventListener('submit', guard(async (e) => {
       e.preventDefault();
@@ -465,9 +515,11 @@
     $('#csv').addEventListener('change', guard(async (e) => {
       const f = e.target.files[0]; if (!f) return;
       const rows = csvToRows(await f.text());
-      const r = await api('/contacts/import', { method: 'POST', body: { rows } });
-      toast(`${r.added} added, ${r.updated} updated${r.skipped.length ? `, ${r.skipped.length} skipped (row ${r.skipped[0].row}: ${r.skipped[0].reason})` : ''}`, !!r.skipped.length);
-      S.classes = await api('/classes'); viewParents();
+      e.target.value = '';
+      if (!rows.length) return toast('The file has no parents in it', true);
+      S.importRows = rows;
+      const check = await api('/contacts/import-check', { method: 'POST', body: { rows } });
+      $('#importBox').innerHTML = importPreview(check);
     }));
     let t; $('#q').addEventListener('input', (e) => { clearTimeout(t); t = setTimeout(() => viewParents(e.target.value), 300); });
     if (q) { const el = $('#q'); el.focus(); el.setSelectionRange(q.length, q.length); }
@@ -707,6 +759,27 @@
       const r = await api('/contacts/consent', { method: 'POST', body: { class_name: cls, source: src, date } });
       toast(`Consent recorded for ${r.updated} parent${r.updated === 1 ? '' : 's'}`);
       viewParents();
+    }
+    else if (a === 'import-go') {
+      const rows = S.importRows || []; if (!rows.length) return toast('Choose the file again', true);
+      const r = await api('/contacts/import', { method: 'POST', body: { rows } }); S.importRows = null;
+      toast(`${r.added} added, ${r.updated} updated${r.skipped.length ? `, ${r.skipped.length} skipped (row ${r.skipped[0].row}: ${r.skipped[0].reason})` : ''}`, !!r.skipped.length);
+      S.classes = await api('/classes'); viewParents();
+    }
+    else if (a === 'import-cancel') { S.importRows = null; $('#importBox').innerHTML = ''; }
+    else if (a === 'chist') { const d = await api('/contacts/' + rowEl.dataset.id + '/history'); $('#chistBox').innerHTML = parentHistory(d); }
+    else if (a === 'chist-close') $('#chistBox').innerHTML = '';
+    else if (a === 'batch-open') {
+      const h = S.hist, id = +el.dataset.id;
+      if (h.openId === id) { h.openId = null; h.detail = null; return renderHistory(); }
+      h.detail = await api('/batches/' + id); h.openId = id; renderHistory();
+    }
+    else if (a === 'batch-retry') {
+      if (!confirm('Send the failed messages of this batch again?')) return;
+      const r = await api('/batches/' + el.dataset.id + '/retry', { method: 'POST' });
+      if (r.quiet) return toast(`Not sent: quiet hours (${r.quiet.start} to ${r.quiet.end}, Nigerian time).`, true);
+      toast(r.heldBack ? `Sending ${r.queued}. ${r.heldBack} held back by the daily limit of ${r.dailyLimit}.` : `Sending ${r.queued} message${r.queued === 1 ? '' : 's'} again…`, !!r.heldBack);
+      await new Promise((ok) => setTimeout(ok, 1500)); S.hist.openId = null; S.hist.detail = null; await viewHistory();
     }
     else if (a === 'cpick-all') document.querySelectorAll('.cpick').forEach((c) => (c.checked = el.checked));
     else if (a === 'grp-add') {
