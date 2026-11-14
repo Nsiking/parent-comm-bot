@@ -163,6 +163,25 @@ if (!hasCol('parent_replies', 'handled_at')) db.exec('ALTER TABLE parent_replies
 if (!hasCol('parent_replies', 'handled_by')) db.exec('ALTER TABLE parent_replies ADD COLUMN handled_by INTEGER');
 if (!hasCol('parent_replies', 'assigned_to')) db.exec('ALTER TABLE parent_replies ADD COLUMN assigned_to INTEGER');
 
+// Class limits for teachers, and the parent opt-in link. Everything here is ADDED.
+db.exec(`CREATE TABLE IF NOT EXISTS staff_classes (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  class_name TEXT NOT NULL,
+  PRIMARY KEY (user_id, class_name)
+)`);
+if (!hasCol('schools', 'optin_token')) db.exec('ALTER TABLE schools ADD COLUMN optin_token TEXT');
+db.exec(`CREATE TABLE IF NOT EXISTS optin_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  school_id INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  student_name TEXT NOT NULL,
+  parent_name TEXT,
+  phone TEXT NOT NULL,
+  note TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_optin_school ON optin_requests(school_id, status)');
+
 // Anything left "queued" by a crash/restart goes back to draft so nothing is silently lost.
 db.prepare("UPDATE messages SET status='draft' WHERE status='queued'").run();
 

@@ -72,9 +72,10 @@ app.post('/api/auth/logout', (_req, res) => { res.clearCookie('pcb_token'); res.
 
 app.get('/api/me', requireAuth, (req, res) => {
   const school = db.prepare('SELECT * FROM schools WHERE id=?').get(req.user.school_id);
-  if (req.user.role !== 'admin') delete school.api_key;
+  if (req.user.role !== 'admin') { delete school.api_key; delete school.optin_token; }
   res.json({
     user: req.user,
+    my_classes: myClasses(req.user),
     owner: isOwnerAccount(req.user),
     school,
     kinds: ai.KINDS,
@@ -108,6 +109,158 @@ app.get('/api/activity', requireAuth, requireAdmin, (req, res) => {
 // Colleagues at the same school (names only), so a reply can be given to one of them.
 app.get('/api/colleagues', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT id, name FROM users WHERE school_id=? ORDER BY name').all(req.user.school_id));
+});
+
+// ---------------------------------------------------------------- class limits (a teacher with classes assigned only works with those classes)
+// No assignment means no limit, so nothing changes until an administrator assigns classes. Administrators are never limited.
+function myClasses(user) {
+  if (!user || user.role === 'admin') return null;
+  const r = db.prepare('SELECT class_name FROM staff_classes WHERE user_id=?').all(user.id);
+  return r.length ? r.map((x) => x.class_name) : null;
+}
+const inClasses = (list, col) => (list ? { sql: ` AND ${col} IN (${placeholders(list.length)})`, params: list } : { sql: '', params: [] });
+// of these message ids, the ones this person may work with
+function mineIds(user, ids) {
+  const list = myClasses(user);
+  if (!list || !ids.length) return ids;
+  return db.prepare(`SELECT m.id FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE m.school_id=? AND c.class_name IN (${placeholders(list.length)}) AND m.id IN (${placeholders(ids.length)})`)
+    .all(user.school_id, ...list, ...ids).map((r) => r.id);
+}
+const NOT_YOUR_CLASS = 'That class is not one of yours. Ask an administrator.';
+app.get('/api/staff-classes', requireAuth, requireAdmin, (req, res) => {
+  const sid = req.user.school_id;
+  const teachers = db.prepare("SELECT id, name FROM users WHERE school_id=? AND role='staff' ORDER BY name").all(sid)
+    .map((t) => ({ ...t, classes: db.prepare('SELECT class_name FROM staff_classes WHERE user_id=? ORDER BY class_name').all(t.id).map((x) => x.class_name) }));
+  const names = new Set(db.prepare("SELECT DISTINCT class_name FROM contacts WHERE school_id=? AND class_name<>''").all(sid).map((r) => r.class_name));
+  teachers.forEach((t) => t.classes.forEach((c) => names.add(c)));
+  res.json({ teachers, classes: [...names].sort((a, b) => a.localeCompare(b)) });
+});
+app.put('/api/staff-classes/:id', requireAuth, requireAdmin, (req, res) => {
+  const sid = req.user.school_id;
+  const t = db.prepare("SELECT id, name FROM users WHERE id=? AND school_id=? AND role='staff'").get(Number(req.params.id) || 0, sid);
+  if (!t) return res.status(404).json({ error: 'That teacher was not found in your school' });
+  const list = [...new Set((Array.isArray(req.body?.classes) ? req.body.classes : []).map((c) => String(c).trim()).filter(Boolean))].slice(0, 100);
+  const known = new Set(db.prepare("SELECT DISTINCT class_name FROM contacts WHERE school_id=? AND class_name<>''").all(sid).map((r) => r.class_name));
+  db.prepare('SELECT class_name FROM staff_classes WHERE user_id=?').all(t.id).forEach((r) => known.add(r.class_name));
+  const bad = list.find((c) => !known.has(c));
+  if (bad) return res.status(400).json({ error: `${bad} is not a class in your parent list` });
+  db.transaction(() => {
+    db.prepare('DELETE FROM staff_classes WHERE user_id=?').run(t.id);
+    const ins = db.prepare('INSERT INTO staff_classes(user_id, class_name) VALUES (?,?)');
+    list.forEach((c) => ins.run(t.id, c));
+  })();
+  logActivity(req.user, 'classes', `${t.name}: ${list.length ? list.join(', ') : 'no limit (sees everyone)'}`);
+  res.json({ ok: true, classes: list });
+});
+
+// ---------------------------------------------------------------- parent opt-in link
+// A school can switch on a link that parents open WITHOUT signing in. They type their child's name and phone number and agree.
+// A match with a parent already in the list records consent; anything else waits for an administrator. The answer is always the same,
+// so the page never reveals who is or is not in the list.
+const escHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const optinLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+const optinViewLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
+const optinPage = (school, inner) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${escHtml(school.name)}</title></head>
+<body style="margin:0;background:#f6f3ea;font-family:Arial,Helvetica,sans-serif;color:#12332c"><div style="max-width:480px;margin:0 auto;padding:24px 16px">
+<div style="background:#12332c;color:#fff;padding:16px 20px;border-radius:12px 12px 0 0;font-size:18px;font-weight:bold">${escHtml(school.name)}</div>
+<div style="background:#fff;padding:20px;border-radius:0 0 12px 12px;border:1px solid #e3dcc8">${inner}</div></div></body></html>`;
+const optinForm = (school, token, error) => optinPage(school, `<h1 style="font-size:20px;margin:0 0 10px">Receive messages from the school</h1>
+<p style="line-height:1.5;margin:0 0 14px">Please give ${escHtml(school.name)} your permission to send you messages about your child, such as notices, absences and results, by WhatsApp or SMS. You can stop at any time by replying STOP.</p>
+${error ? `<p style="background:#fdecea;color:#8a1f11;padding:10px;border-radius:8px">${escHtml(error)}</p>` : ''}
+<form method="post" action="/optin/${token}" autocomplete="off">
+<label style="display:block;margin-bottom:12px">Your child's full name<input name="student_name" required maxlength="120" style="display:block;width:100%;box-sizing:border-box;padding:10px;font-size:16px;margin-top:4px"></label>
+<label style="display:block;margin-bottom:12px">Your name (optional)<input name="parent_name" maxlength="120" style="display:block;width:100%;box-sizing:border-box;padding:10px;font-size:16px;margin-top:4px"></label>
+<label style="display:block;margin-bottom:12px">Your phone number<input name="phone" inputmode="tel" required maxlength="20" placeholder="0803 123 4567" style="display:block;width:100%;box-sizing:border-box;padding:10px;font-size:16px;margin-top:4px"></label>
+<div style="position:absolute;left:-9999px" aria-hidden="true"><input name="website" tabindex="-1" autocomplete="off"></div>
+<label style="display:block;margin-bottom:16px;line-height:1.4"><input type="checkbox" name="agree" value="yes" required> I agree to receive messages from ${escHtml(school.name)} about my child.</label>
+<button type="submit" style="background:#f4b400;color:#12332c;border:0;padding:12px 18px;font-size:16px;font-weight:bold;border-radius:8px;cursor:pointer">Give my consent</button></form>`);
+const optinThanks = (school) => optinPage(school, `<h1 style="font-size:20px;margin:0 0 10px">Thank you</h1><p style="line-height:1.5;margin:0">Your answer has been received. If the details match the school's records, your consent is now recorded. The school may contact you to check the details.</p>`);
+function optinSchool(token) {
+  return /^[a-f0-9]{32}$/.test(String(token)) ? db.prepare('SELECT id, name FROM schools WHERE optin_token=?').get(token) : null;
+}
+const optinMissing = (res) => res.status(404).set('Cache-Control', 'no-store').type('html').send('<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex"><title>Link not found</title><body style="font-family:Arial,sans-serif;padding:24px">This link is not active. Please ask the school for the current one.</body>');
+app.get('/optin/:token', optinViewLimiter, (req, res) => {
+  const school = optinSchool(req.params.token);
+  if (!school) return optinMissing(res);
+  res.set('Cache-Control', 'no-store').type('html').send(optinForm(school, req.params.token));
+});
+app.post('/optin/:token', optinLimiter, express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
+  const school = optinSchool(req.params.token);
+  if (!school) return optinMissing(res);
+  res.set('Cache-Control', 'no-store').type('html');
+  const b = req.body || {};
+  if (b.website) return res.send(optinThanks(school));            // a hidden field only a robot fills in
+  const name = String(b.student_name || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const parent = String(b.parent_name || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const phone = ch.normalizePhone(b.phone);
+  if (b.agree !== 'yes') return res.status(400).send(optinForm(school, req.params.token, 'Please tick the box to give your consent.'));
+  if (!name || !phone) return res.status(400).send(optinForm(school, req.params.token, "Please enter your child's name and a valid phone number."));
+  const same = db.prepare('SELECT id, student_name, opted_out FROM contacts WHERE school_id=? AND phone=?').all(school.id, phone);
+  const key = (s) => String(s).replace(/\s+/g, ' ').trim().toLowerCase();
+  const matched = same.some((c) => key(c.student_name) === key(name));
+  let note = null;
+  if (matched) {
+    const ok = same.filter((c) => !c.opted_out);
+    if (ok.length) {
+      db.prepare(`UPDATE contacts SET consent_at=?, consent_source='parent_online' WHERE school_id=? AND consent_at IS NULL AND id IN (${placeholders(ok.length)})`).run(todayStr(), school.id, ...ok.map((c) => c.id));
+      releaseHeld(school.id);
+      return res.send(optinThanks(school));
+    }
+    note = 'This parent had opted out (replied STOP). Consent was not recorded automatically.';
+  } else note = same.length ? 'This phone number is in your list, but under a different child name.' : 'This phone number is not in your list.';
+  const dup = db.prepare("SELECT 1 FROM optin_requests WHERE school_id=? AND status='pending' AND phone=? AND lower(student_name)=lower(?)").get(school.id, phone, name);
+  const count = db.prepare("SELECT COUNT(*) n FROM optin_requests WHERE school_id=? AND status='pending'").get(school.id).n;
+  if (!dup && count < 300) db.prepare('INSERT INTO optin_requests(school_id, student_name, parent_name, phone, note) VALUES (?,?,?,?,?)').run(school.id, name, parent, phone, note);
+  res.send(optinThanks(school));
+});
+// For the administrator: the link, and what is waiting.
+app.get('/api/optin', requireAuth, requireAdmin, (req, res) => {
+  const s = schoolRow(req.user.school_id);
+  res.json({ link: s.optin_token ? `${req.protocol}://${req.get('host')}/optin/${s.optin_token}` : null,
+    pending: db.prepare("SELECT COUNT(*) n FROM optin_requests WHERE school_id=? AND status='pending'").get(req.user.school_id).n });
+});
+app.post('/api/optin/enable', requireAuth, requireAdmin, (req, res) => {
+  const had = !!schoolRow(req.user.school_id).optin_token, token = crypto.randomBytes(16).toString('hex');
+  db.prepare('UPDATE schools SET optin_token=? WHERE id=?').run(token, req.user.school_id);
+  logActivity(req.user, 'settings', had ? 'Parent opt-in link: new link made (the old one stopped working)' : 'Parent opt-in link: switched on');
+  res.json({ link: `${req.protocol}://${req.get('host')}/optin/${token}` });
+});
+app.delete('/api/optin', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('UPDATE schools SET optin_token=NULL WHERE id=?').run(req.user.school_id);
+  logActivity(req.user, 'settings', 'Parent opt-in link: switched off');
+  res.json({ ok: true });
+});
+app.get('/api/optin/pending', requireAuth, requireAdmin, (req, res) => {
+  const sid = req.user.school_id;
+  res.json({ total: db.prepare("SELECT COUNT(*) n FROM optin_requests WHERE school_id=? AND status='pending'").get(sid).n,
+    list: db.prepare("SELECT id, student_name, parent_name, phone, note, datetime(created_at, '+1 hour') AS at FROM optin_requests WHERE school_id=? AND status='pending' ORDER BY id DESC LIMIT 100").all(sid) });
+});
+app.post('/api/optin/:id/ignore', requireAuth, requireAdmin, (req, res) => {
+  const r = db.prepare("UPDATE optin_requests SET status='ignored' WHERE id=? AND school_id=? AND status='pending'").run(Number(req.params.id) || 0, req.user.school_id);
+  if (!r.changes) return res.status(404).json({ error: 'That request is no longer waiting' });
+  res.json({ ok: true });
+});
+app.post('/api/optin/:id/approve', requireAuth, requireAdmin, (req, res) => {
+  const sid = req.user.school_id;
+  const p = db.prepare("SELECT * FROM optin_requests WHERE id=? AND school_id=? AND status='pending'").get(Number(req.params.id) || 0, sid);
+  if (!p) return res.status(404).json({ error: 'That request is no longer waiting' });
+  const same = db.prepare('SELECT id, opted_out FROM contacts WHERE school_id=? AND phone=?').all(sid, p.phone);
+  let recorded = 0, added = false;
+  if (same.length) {
+    const ok = same.filter((c) => !c.opted_out);
+    if (ok.length) recorded = db.prepare(`UPDATE contacts SET consent_at=?, consent_source='parent_online' WHERE school_id=? AND consent_at IS NULL AND id IN (${placeholders(ok.length)})`).run(todayStr(), sid, ...ok.map((c) => c.id)).changes;
+    else return res.status(409).json({ error: 'This parent opted out (replied STOP), so consent cannot be recorded. Ignore this request, or ask the parent to opt in again.' });
+  } else {
+    const cls = String(req.body?.class_name || '').trim();
+    if (!cls) return res.status(409).json({ error: 'No parent in your list has this phone number. Type a class to add this child as a new parent.' });
+    db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, parent_name, phone, channel, consent_at, consent_source) VALUES (?,?,?,?,?,?,?,?)`)
+      .run(sid, p.student_name, cls.slice(0, 60), p.parent_name || '', p.phone, 'whatsapp', todayStr(), 'parent_online');
+    added = true;
+  }
+  db.prepare("UPDATE optin_requests SET status='approved' WHERE id=?").run(p.id);
+  releaseHeld(sid);
+  logActivity(req.user, 'consent', added ? `${p.student_name} added as a new parent with consent (opt-in link)` : `Consent recorded for ${p.student_name} (opt-in link, approved)`);
+  res.json({ ok: true, added, recorded });
 });
 
 // ---------------------------------------------------------------- school settings & staff
@@ -167,21 +320,23 @@ app.post('/api/users', requireAuth, requireAdmin, (req, res) => {
 
 // ---------------------------------------------------------------- contacts
 app.get('/api/classes', requireAuth, (req, res) => {
+  const lim = inClasses(myClasses(req.user), 'class_name');
   res.json(db.prepare(`SELECT class_name AS name, COUNT(*) AS total, SUM(opted_out=0) AS reachable, SUM(opted_out=0 AND consent_at IS NOT NULL) AS consented, SUM(consent_at IS NOT NULL) AS with_consent
-    FROM contacts WHERE school_id=? GROUP BY class_name ORDER BY class_name`).all(req.user.school_id));
+    FROM contacts WHERE school_id=?${lim.sql} GROUP BY class_name ORDER BY class_name`).all(req.user.school_id, ...lim.params));
 });
 
 app.get('/api/contacts', requireAuth, (req, res) => {
   const q = `%${String(req.query.q || '').toLowerCase()}%`;
   const gid = Number(req.query.group) || 0;
+  const lim = inClasses(myClasses(req.user), 'class_name');
   res.json(db.prepare(`SELECT * FROM contacts WHERE school_id=? AND
-      (lower(student_name) LIKE ? OR lower(parent_name) LIKE ? OR lower(class_name) LIKE ? OR phone LIKE ? OR lower(admission_no) LIKE ?)
+      (lower(student_name) LIKE ? OR lower(parent_name) LIKE ? OR lower(class_name) LIKE ? OR phone LIKE ? OR lower(admission_no) LIKE ?)${lim.sql}
       ${gid ? 'AND id IN (SELECT contact_id FROM parent_group_members WHERE group_id=?)' : ''}
-      ORDER BY class_name, student_name LIMIT 500`).all(req.user.school_id, q, q, q, q, q, ...(gid ? [gid] : [])));
+      ORDER BY class_name, student_name LIMIT 500`).all(req.user.school_id, q, q, q, q, q, ...lim.params, ...(gid ? [gid] : [])));
 });
 
 // ---- consent record: where/when a parent agreed to receive messages
-const CONSENT_SOURCES = { admission_form: 'Admission form', verbal: 'Verbal', other: 'Other', imported: 'Imported list' };
+const CONSENT_SOURCES = { admission_form: 'Admission form', verbal: 'Verbal', other: 'Other', imported: 'Imported list', parent_online: 'Parent confirmed online' };
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const validDay = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) && String(d) <= todayStr() ? String(d) : todayStr());
 function consentFrom(raw) {
@@ -213,6 +368,7 @@ function cleanContact(b) {
 app.post('/api/contacts', requireAuth, (req, res) => {
   const c = cleanContact(req.body || {});
   if (c.error) return res.status(400).json({ error: c.error });
+  { const mine = myClasses(req.user); if (mine && !mine.includes(c.class_name)) return res.status(403).json({ error: NOT_YOUR_CLASS }); }
   const src = consentFrom((req.body || {}).consent);
   db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, admission_no, parent_name, phone, channel, consent_at, consent_source) VALUES (?,?,?,?,?,?,?,?,?)`)
     .run(req.user.school_id, c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel, src ? todayStr() : null, src);
@@ -222,6 +378,8 @@ app.post('/api/contacts', requireAuth, (req, res) => {
 app.put('/api/contacts/:id', requireAuth, (req, res) => {
   const existing = db.prepare('SELECT * FROM contacts WHERE id=? AND school_id=?').get(req.params.id, req.user.school_id);
   if (!existing) return res.status(404).json({ error: 'Not found' });
+  const mineCls = myClasses(req.user);
+  if (mineCls && !mineCls.includes(existing.class_name)) return res.status(404).json({ error: 'Not found' });
   const b = req.body || {};
   if (Object.keys(b).length === 1 && 'opted_out' in b) {
     db.prepare('UPDATE contacts SET opted_out=? WHERE id=?').run(b.opted_out ? 1 : 0, existing.id);
@@ -239,6 +397,7 @@ app.put('/api/contacts/:id', requireAuth, (req, res) => {
   }
   const c = cleanContact({ ...existing, ...b });
   if (c.error) return res.status(400).json({ error: c.error });
+  if (mineCls && !mineCls.includes(c.class_name)) return res.status(403).json({ error: NOT_YOUR_CLASS });
   db.prepare(`UPDATE contacts SET student_name=?, class_name=?, admission_no=?, parent_name=?, phone=?, channel=? WHERE id=?`)
     .run(c.student_name, c.class_name, c.admission_no, c.parent_name, c.phone, c.channel, existing.id);
   res.json({ ok: true });
@@ -246,6 +405,7 @@ app.put('/api/contacts/:id', requireAuth, (req, res) => {
 
 app.delete('/api/contacts/:id', requireAuth, (req, res) => {
   const gone = db.prepare('SELECT student_name, class_name FROM contacts WHERE id=? AND school_id=?').get(req.params.id, req.user.school_id);
+  { const mine = myClasses(req.user); if (gone && mine && !mine.includes(gone.class_name)) return res.status(403).json({ error: NOT_YOUR_CLASS }); }
   const r = db.prepare('DELETE FROM contacts WHERE id=? AND school_id=?').run(req.params.id, req.user.school_id);
   if (r.changes && gone) logActivity(req.user, 'parent_deleted', `${gone.student_name}${gone.class_name ? ', ' + gone.class_name : ''}`);
   res.json({ ok: true });
@@ -257,6 +417,7 @@ app.post('/api/contacts/import', requireAuth, (req, res) => {
   if (rows.length > 2000) return res.status(400).json({ error: 'Import up to 2,000 rows at a time' });
   let added = 0, updated = 0;
   const skipped = [];
+  const mineCls = myClasses(req.user);
   const find = db.prepare('SELECT id FROM contacts WHERE school_id=? AND phone=? AND lower(student_name)=lower(?)');
   const ins = db.prepare(`INSERT INTO contacts(school_id, student_name, class_name, admission_no, parent_name, phone, channel, consent_at, consent_source) VALUES (?,?,?,?,?,?,?,?,?)`);
   const upd = db.prepare('UPDATE contacts SET class_name=?, admission_no=?, parent_name=?, channel=? WHERE id=?');
@@ -265,6 +426,7 @@ app.post('/api/contacts/import', requireAuth, (req, res) => {
     rows.forEach((r, i) => {
       const c = cleanContact(r);
       if (c.error) return skipped.push({ row: i + 2, reason: c.error });
+      if (mineCls && !mineCls.includes(c.class_name)) return skipped.push({ row: i + 2, reason: c.class_name ? `Class ${c.class_name} is not one of yours` : 'A class is required for your account' });
       const src = consentFrom(r.consent);
       const hit = find.get(req.user.school_id, c.phone, c.student_name);
       if (hit) { upd.run(c.class_name, c.admission_no, c.parent_name, c.channel, hit.id); if (src) setConsent.run(todayStr(), src, hit.id); updated++; }
@@ -286,11 +448,13 @@ app.post('/api/contacts/import-check', requireAuth, (req, res) => {
   const find = db.prepare('SELECT id FROM contacts WHERE school_id=? AND phone=? AND lower(student_name)=lower(?)');
   const existing = new Set(db.prepare('SELECT DISTINCT class_name FROM contacts WHERE school_id=? AND class_name<>\'\'').all(sid).map((r) => r.class_name));
   const seen = new Map(), phoneKids = new Map(), classCount = new Map();
+  const mineCls = myClasses(req.user);
   const skipped = [], repeated = [], noClass = [];
   let add = 0, update = 0;
   rows.forEach((r, i) => {
     const row = i + 2, c = cleanContact(r);
     if (c.error) return skipped.push({ row, reason: c.error });
+    if (mineCls && !mineCls.includes(c.class_name)) return skipped.push({ row, reason: c.class_name ? `Class ${c.class_name} is not one of yours` : 'A class is required for your account' });
     const key = `${c.phone}|${c.student_name.toLowerCase()}`;
     if (seen.has(key)) repeated.push({ row, first: seen.get(key), student: c.student_name });
     else { seen.set(key, row); if (find.get(sid, c.phone, c.student_name)) update++; else add++; }
@@ -320,6 +484,7 @@ app.get('/api/contacts/:id/history', requireAuth, (req, res) => {
   const sid = req.user.school_id;
   const c = db.prepare('SELECT * FROM contacts WHERE id=? AND school_id=?').get(req.params.id, sid);
   if (!c) return res.status(404).json({ error: 'Parent not found' });
+  { const mine = myClasses(req.user); if (mine && !mine.includes(c.class_name)) return res.status(404).json({ error: 'Parent not found' }); }
   const messages = db.prepare(`SELECT m.id, ${WHEN_SQL} AS at, m.status, m.channel, m.body, m.error, ${KIND_SQL} AS kind
     ${HISTORY_FROM} WHERE m.school_id=? AND m.contact_id=? ORDER BY COALESCE(m.sent_at, m.created_at) DESC, m.id DESC LIMIT 100`).all(sid, c.id);
   const replies = db.prepare("SELECT id, body, datetime(received_at, '+1 hour') AS at FROM parent_replies WHERE school_id=? AND phone=? ORDER BY id DESC LIMIT 50").all(sid, c.phone);
@@ -437,13 +602,14 @@ app.delete('/api/templates/:id', requireAuth, (req, res) => {
 
 // ---------------------------------------------------------------- parent groups (any set of parents you choose, besides classes)
 const MAX_GROUPS = 50;
-function groupList(sid) {
+function groupList(sid, mine) {
+  const lim = inClasses(mine, 'c.class_name');
   return db.prepare(`SELECT g.id, g.name, COUNT(c.id) AS total, COALESCE(SUM(c.opted_out=0), 0) AS reachable
-    FROM parent_groups g LEFT JOIN parent_group_members mm ON mm.group_id=g.id LEFT JOIN contacts c ON c.id=mm.contact_id
-    WHERE g.school_id=? GROUP BY g.id ORDER BY lower(g.name)`).all(sid);
+    FROM parent_groups g LEFT JOIN parent_group_members mm ON mm.group_id=g.id LEFT JOIN contacts c ON c.id=mm.contact_id${lim.sql}
+    WHERE g.school_id=? GROUP BY g.id ORDER BY lower(g.name)`).all(...lim.params, sid);
 }
 const idList = (v) => (Array.isArray(v) ? v : []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
-app.get('/api/groups', requireAuth, (req, res) => res.json(groupList(req.user.school_id)));
+app.get('/api/groups', requireAuth, (req, res) => res.json(groupList(req.user.school_id, myClasses(req.user))));
 
 app.post('/api/groups/add', requireAuth, (req, res) => {
   const sid = req.user.school_id;
@@ -466,7 +632,8 @@ app.post('/api/groups/add', requireAuth, (req, res) => {
       g = { id: Number(r.lastInsertRowid), name };
     }
   }
-  const mine = db.prepare(`SELECT id FROM contacts WHERE school_id=? AND id IN (${placeholders(ids.length)})`).all(sid, ...ids).map((r) => r.id);
+  const lim = inClasses(myClasses(req.user), 'class_name');
+  const mine = db.prepare(`SELECT id FROM contacts WHERE school_id=? AND id IN (${placeholders(ids.length)})${lim.sql}`).all(sid, ...ids, ...lim.params).map((r) => r.id);
   const ins = db.prepare('INSERT OR IGNORE INTO parent_group_members(group_id, contact_id) VALUES (?,?)');
   let added = 0;
   db.transaction(() => { for (const id of mine) added += ins.run(g.id, id).changes; })();
@@ -480,11 +647,13 @@ app.post('/api/groups/remove', requireAuth, (req, res) => {
   if (!g) return res.status(404).json({ error: 'That group no longer exists' });
   const ids = idList(req.body?.contactIds);
   if (!ids.length) return res.status(400).json({ error: 'Tick at least one parent first' });
-  const r = db.prepare(`DELETE FROM parent_group_members WHERE group_id=? AND contact_id IN (${placeholders(ids.length)})`).run(g.id, ...ids);
+  const lim = inClasses(myClasses(req.user), 'class_name');
+  const r = db.prepare(`DELETE FROM parent_group_members WHERE group_id=? AND contact_id IN (SELECT id FROM contacts WHERE school_id=? AND id IN (${placeholders(ids.length)})${lim.sql})`).run(g.id, sid, ...ids, ...lim.params);
   res.json({ ok: true, removed: r.changes });
 });
 
 app.delete('/api/groups/:id', requireAuth, (req, res) => {
+  if (myClasses(req.user)) return res.status(403).json({ error: 'Only an administrator can delete a group' });
   const gone = db.prepare('SELECT name FROM parent_groups WHERE id=? AND school_id=?').get(req.params.id, req.user.school_id);
   db.prepare('DELETE FROM parent_groups WHERE id=? AND school_id=?').run(req.params.id, req.user.school_id);   // the parents themselves are not touched
   if (gone) logActivity(req.user, 'group', `Group "${gone.name}" deleted`);
@@ -532,6 +701,7 @@ app.post('/api/drafts', requireAuth, wrap(async (req, res) => {
   } else {
     contacts = db.prepare('SELECT * FROM contacts WHERE school_id=?').all(sid);
   }
+  { const mine = myClasses(req.user); if (mine) contacts = contacts.filter((c) => mine.includes(c.class_name)); }
   const total = contacts.length;
   contacts = contacts.filter((c) => !c.opted_out);
   const optedOut = total - contacts.length;
@@ -566,14 +736,15 @@ const GROUPS = { draft: ['draft'], scheduled: ['scheduled'], sent: ['queued', 's
 
 app.get('/api/messages', requireAuth, (req, res) => {
   const statuses = GROUPS[req.query.group] || GROUPS.draft;
+  const lim = inClasses(myClasses(req.user), 'c.class_name');
   const rows = db.prepare(`SELECT m.*, c.student_name, c.parent_name, c.class_name, b.kind, datetime(m.scheduled_at, '+1 hour') AS scheduled_wat, ru.name AS approval_by
     FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id LEFT JOIN batches b ON b.id=m.batch_id LEFT JOIN users ru ON ru.id=m.approval_requested_by
-    WHERE m.school_id=? AND m.status IN (${placeholders(statuses.length)})
-    ORDER BY ${req.query.group === 'scheduled' ? 'm.scheduled_at ASC, m.id ASC' : 'm.id DESC'} LIMIT 300`).all(req.user.school_id, ...statuses);
+    WHERE m.school_id=? AND m.status IN (${placeholders(statuses.length)})${lim.sql}
+    ORDER BY ${req.query.group === 'scheduled' ? 'm.scheduled_at ASC, m.id ASC' : 'm.id DESC'} LIMIT 300`).all(req.user.school_id, ...statuses, ...lim.params);
   const counts = {};
   for (const [g, s] of Object.entries(GROUPS))
-    counts[g] = db.prepare(`SELECT COUNT(*) n FROM messages WHERE school_id=? AND status IN (${placeholders(s.length)})`).get(req.user.school_id, ...s).n;
-  const approvals = db.prepare("SELECT COUNT(*) n FROM messages WHERE school_id=? AND status IN ('draft','failed') AND approval_requested_at IS NOT NULL").get(req.user.school_id).n;
+    counts[g] = db.prepare(`SELECT COUNT(*) n FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id WHERE m.school_id=? AND m.status IN (${placeholders(s.length)})${lim.sql}`).get(req.user.school_id, ...s, ...lim.params).n;
+  const approvals = db.prepare(`SELECT COUNT(*) n FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id WHERE m.school_id=? AND m.status IN ('draft','failed') AND m.approval_requested_at IS NOT NULL${lim.sql}`).get(req.user.school_id, ...lim.params).n;
   res.json({ messages: rows.map((m) => ({ ...m, ...(m.channel === 'sms' ? ch.smsSegments(m.body) : {}) })), counts, approvals });
 });
 
@@ -581,6 +752,7 @@ app.put('/api/messages/:id', requireAuth, (req, res) => {
   const body = String(req.body?.body || '').trim();
   if (!body) return res.status(400).json({ error: 'Message cannot be empty' });
   if (body.length > 1000) return res.status(400).json({ error: 'Message is too long (max 1,000 characters)' });
+  if (!mineIds(req.user, [Number(req.params.id) || 0]).length) return res.status(404).json({ error: 'Message not editable' });
   const before = db.prepare("SELECT approval_requested_at AS a, body FROM messages WHERE id=? AND school_id=? AND status IN ('draft','failed')").get(req.params.id, req.user.school_id);
   const r = db.prepare("UPDATE messages SET body=?, ai=0 WHERE id=? AND school_id=? AND status IN ('draft','failed')").run(body, req.params.id, req.user.school_id);
   if (!r.changes) return res.status(404).json({ error: 'Message not editable' });
@@ -591,6 +763,7 @@ app.put('/api/messages/:id', requireAuth, (req, res) => {
 });
 
 app.delete('/api/messages/:id', requireAuth, (req, res) => {
+  if (!mineIds(req.user, [Number(req.params.id) || 0]).length) return res.status(404).json({ error: 'Message not found' });
   const r = db.prepare("DELETE FROM messages WHERE id=? AND school_id=? AND status IN ('draft','failed','skipped')").run(req.params.id, req.user.school_id);
   if (r.changes) logActivity(req.user, 'discarded', 'A message was discarded');
   res.json({ ok: true });
@@ -657,8 +830,10 @@ function queueAndSend(schoolId, ids) {
 }
 
 app.post('/api/messages/send', requireAuth, (req, res) => {
-  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+  let ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
   if (!ids.length) return res.status(400).json({ error: 'Select at least one message' });
+  ids = mineIds(req.user, ids);
+  if (!ids.length) return res.status(403).json({ error: 'Those messages are not in your classes.' });
   const sch = schoolRow(req.user.school_id);
   if (sch.require_approval && req.user.role !== 'admin')
     return res.status(403).json({ error: 'Your school needs an administrator to approve messages before they are sent. Use "Ask for approval".' });
@@ -671,8 +846,10 @@ app.post('/api/messages/send', requireAuth, (req, res) => {
 
 // A teacher asks the administrator to approve drafts (used when the school setting "Teachers need approval" is on).
 app.post('/api/messages/request-approval', requireAuth, (req, res) => {
-  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+  let ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
   if (!ids.length) return res.status(400).json({ error: 'Select at least one message' });
+  ids = mineIds(req.user, ids);
+  if (!ids.length) return res.status(403).json({ error: 'Those messages are not in your classes.' });
   if (!schoolRow(req.user.school_id).require_approval) return res.status(400).json({ error: 'Approval is not switched on for this school' });
   const r = db.prepare(`UPDATE messages SET approval_requested_at=datetime('now'), approval_requested_by=? WHERE school_id=? AND status IN ('draft','failed') AND id IN (${placeholders(ids.length)})`)
     .run(req.user.id, req.user.school_id, ...ids);
@@ -687,9 +864,10 @@ const KIND_SQL = "CASE WHEN b.kind IS NOT NULL THEN b.kind WHEN m.dedupe_key LIK
 const HISTORY_FROM = 'FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id LEFT JOIN batches b ON b.id=m.batch_id';
 const HISTORY_STATUS = { sent: ['queued', 'sent', 'delivered', 'read'], failed: ['failed'], skipped: ['skipped'], draft: ['draft'], scheduled: ['scheduled'] };
 
-function historyFilter(schoolId, query) {
+function historyFilter(schoolId, query, user) {
   const where = ['m.school_id=?'];
   const params = [schoolId];
+  { const lim = inClasses(myClasses(user), 'c.class_name'); if (lim.sql) { where.push(lim.sql.slice(5)); params.push(...lim.params); } }
   const text = String(query.q || '').trim().toLowerCase();
   if (text) {
     const like = `%${text}%`;
@@ -708,7 +886,7 @@ function historyFilter(schoolId, query) {
 }
 
 app.get('/api/messages/history', requireAuth, (req, res) => {
-  const f = historyFilter(req.user.school_id, req.query);
+  const f = historyFilter(req.user.school_id, req.query, req.user);
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
   const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
   const total = db.prepare(`SELECT COUNT(*) AS n ${HISTORY_FROM} WHERE ${f.where}`).get(...f.params).n;
@@ -729,7 +907,7 @@ const prettyPhone = (p) => {
 };
 
 app.get('/api/messages/export.csv', requireAuth, (req, res) => {
-  const f = historyFilter(req.user.school_id, req.query);
+  const f = historyFilter(req.user.school_id, req.query, req.user);
   const rows = db.prepare(`SELECT ${WHEN_SQL} AS at, m.status, m.channel, m.phone, m.body, m.error, c.parent_name, c.student_name, c.class_name, ${KIND_SQL} AS kind
     ${HISTORY_FROM} WHERE ${f.where} ORDER BY COALESCE(m.sent_at, m.created_at) DESC, m.id DESC LIMIT 20000`).all(...f.params);
   const head = ['Date', 'Time', 'Class', 'Student', 'Parent', 'Phone', 'Type', 'Channel', 'Status', 'Reason', 'Message'];
@@ -747,8 +925,9 @@ app.get('/api/messages/export.csv', requireAuth, (req, res) => {
 
 app.get('/api/messages/summary', requireAuth, (req, res) => {
   const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(String(req.query.month || '')) ? String(req.query.month) : new Date(Date.now() + 3600e3).toISOString().slice(0, 7);
+  const lim = inClasses(myClasses(req.user), 'c.class_name');
   const found = db.prepare(`SELECT m.status AS status, m.channel AS channel, c.class_name AS class_name, ${KIND_SQL} AS kind, COUNT(*) AS n
-    ${HISTORY_FROM} WHERE m.school_id=? AND strftime('%Y-%m', ${WHEN_SQL}) = ? GROUP BY m.status, m.channel, c.class_name, kind`).all(req.user.school_id, month);
+    ${HISTORY_FROM} WHERE m.school_id=? AND strftime('%Y-%m', ${WHEN_SQL}) = ?${lim.sql} GROUP BY m.status, m.channel, c.class_name, kind`).all(req.user.school_id, month, ...lim.params);
   const totals = { sent: 0, delivered: 0, failed: 0, skipped: 0, draft: 0, scheduled: 0, whatsapp: 0, sms: 0 };
   const byKind = {}, byClass = {};
   const add = (map, key, label, bucket, n) => { const e = map[key] || (map[key] = { key, label, sent: 0, failed: 0, skipped: 0, draft: 0, scheduled: 0 }); e[bucket] += n; };
@@ -766,14 +945,16 @@ app.get('/api/messages/summary', requireAuth, (req, res) => {
 
 // Delivery report: for each batch of messages, what happened to them.
 app.get('/api/batches', requireAuth, (req, res) => {
+  const mine = myClasses(req.user);
+  const mlim = mine ? ` AND m.contact_id IN (SELECT id FROM contacts WHERE school_id=b.school_id AND class_name IN (${placeholders(mine.length)}))` : '';
   const rows = db.prepare(`SELECT b.id, b.kind, datetime(b.created_at, '+1 hour') AS at, u.name AS by_name,
       COUNT(m.id) AS total,
       SUM(m.status IN ('queued','sent','delivered','read')) AS sent,
       SUM(m.status IN ('delivered','read')) AS delivered,
       SUM(m.status='failed') AS failed, SUM(m.status='skipped') AS skipped,
       SUM(m.status IN ('draft','scheduled')) AS waiting
-    FROM batches b LEFT JOIN users u ON u.id=b.created_by LEFT JOIN messages m ON m.batch_id=b.id AND m.school_id=b.school_id
-    WHERE b.school_id=? GROUP BY b.id HAVING COUNT(m.id) > 0 ORDER BY b.id DESC LIMIT 30`).all(req.user.school_id);
+    FROM batches b LEFT JOIN users u ON u.id=b.created_by LEFT JOIN messages m ON m.batch_id=b.id AND m.school_id=b.school_id${mlim}
+    WHERE b.school_id=? GROUP BY b.id HAVING COUNT(m.id) > 0 ORDER BY b.id DESC LIMIT 30`).all(...(mine || []), req.user.school_id);
   res.json(rows.map((r) => ({ ...r, kind_label: ai.KINDS[r.kind] || 'Other' })));
 });
 
@@ -781,9 +962,10 @@ app.get('/api/batches/:id', requireAuth, (req, res) => {
   const sid = req.user.school_id;
   const b = db.prepare('SELECT id FROM batches WHERE id=? AND school_id=?').get(req.params.id, sid);
   if (!b) return res.status(404).json({ error: 'Batch not found' });
+  const lim = inClasses(myClasses(req.user), 'c.class_name');
   const problems = db.prepare(`SELECT m.id, m.status, m.phone, m.channel, m.error, c.parent_name, c.student_name, c.class_name
-    FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id WHERE m.school_id=? AND m.batch_id=? AND m.status IN ('failed','skipped')
-    ORDER BY m.id LIMIT 200`).all(sid, b.id);
+    FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id WHERE m.school_id=? AND m.batch_id=? AND m.status IN ('failed','skipped')${lim.sql}
+    ORDER BY m.id LIMIT 200`).all(sid, b.id, ...lim.params);
   res.json({ id: b.id, problems });
 });
 
@@ -796,7 +978,8 @@ app.post('/api/batches/:id/retry', requireAuth, (req, res) => {
   if (sch.require_approval && req.user.role !== 'admin')
     return res.status(403).json({ error: 'Your school needs an administrator to approve messages before they are sent. Ask an administrator to retry these.' });
   if (quietNow(sch)) return res.status(409).json({ error: quietText(sch) });
-  const ids = db.prepare("SELECT id FROM messages WHERE school_id=? AND batch_id=? AND status='failed'").all(sid, b.id).map((r) => r.id);
+  let ids = db.prepare("SELECT id FROM messages WHERE school_id=? AND batch_id=? AND status='failed'").all(sid, b.id).map((r) => r.id);
+  ids = mineIds(req.user, ids);
   if (!ids.length) return res.status(400).json({ error: 'Nothing failed in this batch' });
   const out = queueAndSend(sid, ids);
   if (out.queued) logActivity(req.user, 'retried', `${plural(out.queued, 'failed message')} sent again`);
@@ -1036,8 +1219,10 @@ app.post('/webhooks/termii/:token', (req, res) => {
 const SCHEDULE_GRACE_HOURS = 6;   // if the server was off and a time is this overdue, a stale message is NOT sent
 
 app.post('/api/messages/schedule', requireAuth, (req, res) => {
-  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+  let ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
   if (!ids.length) return res.status(400).json({ error: 'Select at least one message' });
+  ids = mineIds(req.user, ids);
+  if (!ids.length) return res.status(403).json({ error: 'Those messages are not in your classes.' });
   const sch = schoolRow(req.user.school_id);
   if (sch.require_approval && req.user.role !== 'admin')
     return res.status(403).json({ error: 'Your school needs an administrator to approve messages before they are sent. Use "Ask for approval".' });
@@ -1076,8 +1261,10 @@ app.post('/api/messages/schedule', requireAuth, (req, res) => {
 });
 
 app.post('/api/messages/unschedule', requireAuth, (req, res) => {
-  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+  let ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
   if (!ids.length) return res.status(400).json({ error: 'Select at least one message' });
+  ids = mineIds(req.user, ids);
+  if (!ids.length) return res.status(403).json({ error: 'Those messages are not in your classes.' });
   // a reminder is simply removed (it is not a draft anyone wrote), and cancelling a message removes its reminder with it
   const gone = db.prepare(`DELETE FROM messages WHERE school_id=? AND status='scheduled' AND reminder_of IS NOT NULL AND (id IN (${placeholders(ids.length)}) OR reminder_of IN (${placeholders(ids.length)}))`)
     .run(req.user.school_id, ...ids, ...ids);
@@ -1207,6 +1394,7 @@ app.post('/api/platform/teacher/move', requireAuth, requireAdmin, ownerOnly, (re
   const from = db.prepare('SELECT name FROM schools WHERE id = ?').get(target.school_id);
   if (!saveStaffChange(res, () => {
     db.prepare("UPDATE users SET school_id = ? WHERE id = ? AND role = 'staff'").run(to.id, target.id);
+    db.prepare('DELETE FROM staff_classes WHERE user_id = ?').run(target.id);   // classes belong to the old school
     recordStaffAction(req.user, 'moved', target, `from ${from.name} to ${to.name}`);
   })) return;
   res.json({ ok: true, to: to.name });

@@ -129,9 +129,10 @@
       </div></div>
       <div class="card"><h3>Send to</h3>
         ${S.classes.length ? `<div class="chips" style="margin-top:10px">
-          <button class="chip ${pickedAll ? 'on' : ''}" data-a="pick" data-c="*">Whole school (${S.classes.reduce((n, c) => n + reach(c), 0)})</button>
+          <button class="chip ${pickedAll ? 'on' : ''}" data-a="pick" data-c="*">${Array.isArray(S.me.my_classes) ? 'All my classes' : 'Whole school'} (${S.classes.reduce((n, c) => n + reach(c), 0)})</button>
           ${S.classes.map((c) => `<button class="chip ${S.picked.has(c.name) ? 'on' : ''}" data-a="pick" data-c="${esc(c.name)}">${esc(c.name || 'No class')} (${reach(c)})</button>`).join('')}
         </div>
+        ${Array.isArray(S.me.my_classes) ? `<p class="small muted" style="margin:10px 0 0">Your classes: ${esc(S.me.my_classes.join(', '))}</p>` : ''}
         ${S.groups.length ? `<p class="small muted" style="margin:12px 0 0">Groups (make them on the Parents page)</p><div class="chips" style="margin-top:6px">
           ${S.groups.map((g) => `<button class="chip ${S.pickedG.has(g.id) ? 'on' : ''}" data-a="pick-group" data-g="${g.id}">${esc(g.name)} (${g.reachable})</button>`).join('')}</div>` : ''}` : `<p class="muted">No parents yet. <button class="link" data-a="nav" data-v="parents">Add or import parents</button> first.</p>`}
       </div>
@@ -461,7 +462,7 @@
   // ---------- consent record
   const reach = (c) => (S.me.school.require_consent ? c.consented : c.reachable);
   const CONSENT_OPTS = [['admission_form', 'Admission form'], ['verbal', 'Verbal'], ['other', 'Other']];
-  const consentOptions = (sel) => `<option value="">Not recorded</option>${CONSENT_OPTS.map(([v, l]) => `<option value="${v}" ${sel === v ? 'selected' : ''}>${l}</option>`).join('')}${sel === 'imported' ? '<option value="imported" selected>Imported list</option>' : ''}`;
+  const consentOptions = (sel) => `<option value="">Not recorded</option>${CONSENT_OPTS.map(([v, l]) => `<option value="${v}" ${sel === v ? 'selected' : ''}>${l}</option>`).join('')}${sel === 'imported' ? '<option value="imported" selected>Imported list</option>' : ''}${sel === 'parent_online' ? '<option value="parent_online" selected>Parent confirmed online</option>' : ''}`;
   const todayLocal = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 
   // ---------- import check (what a CSV file would do, before anything is saved)
@@ -500,9 +501,17 @@
     if (S.pgroup && !S.groups.some((g) => g.id === S.pgroup)) S.pgroup = 0;
     S.contacts = await api('/contacts?q=' + encodeURIComponent(q) + (S.pgroup ? '&group=' + S.pgroup : ''));
     S.classes = await api('/classes');
+    const optPend = S.me.user.role === 'admin' ? await api('/optin/pending').catch(() => null) : null;
+    const optCard = optPend && optPend.list.length ? `<div class="card"><h3>Pending opt-ins (${optPend.total})</h3>
+        <p class="small muted" style="margin:6px 0 10px">Parents who used your opt-in link but did not match your list exactly. Approve only if you know the parent.</p>
+        <table><thead><tr><th>Child</th><th>Parent</th><th>Phone</th><th>Why it is waiting</th><th></th></tr></thead><tbody>
+        ${optPend.list.map((p) => `<tr><td>${esc(p.student_name)}</td><td>${esc(p.parent_name || '')}</td><td>${esc(p.phone)}</td><td class="small muted">${esc(p.note || '')}<br>${esc(p.at)}</td>
+          <td><button class="btn" data-a="optin-approve" data-id="${p.id}">Approve</button> <button class="btn ghost" data-a="optin-ignore" data-id="${p.id}">Ignore</button></td></tr>`).join('')}
+        </tbody></table></div>` : '';
     const totalParents = S.classes.reduce((n, c) => n + c.total, 0), withConsent = S.classes.reduce((n, c) => n + (c.with_consent || 0), 0);
     $('#view').innerHTML = `
       <div class="head"><div><h1>Parents</h1><p class="muted">One row per child and parent/guardian. Numbers like 0803… are converted to +234 automatically.</p></div></div>
+      ${optCard}
       <div class="card"><h3>Add a parent</h3>
         <form id="addForm" class="grid" style="margin-top:12px">
           <label>Student name<input name="student_name" required></label><label>Class<input name="class_name" placeholder="JSS 1A"></label>
@@ -561,6 +570,18 @@
     const users = admin ? await api('/users') : [];
     const smsHook = admin ? await api('/sms-webhook').catch(() => null) : null;
     const usage = admin ? await api('/sms/usage').catch(() => null) : null;
+    const clsInfo = admin ? await api('/staff-classes').catch(() => null) : null;
+    const optin = admin ? await api('/optin').catch(() => null) : null;
+    const clsCard = () => `<div class="card"><h3>Class assignments</h3>
+        <p class="small muted" style="margin:6px 0 10px">Tick the classes each teacher looks after. A teacher with classes ticked sees and messages only those classes. A teacher with none ticked sees every class. Administrators always see everything.</p>
+        ${clsInfo.teachers.length ? clsInfo.teachers.map((t) => `<div style="border-top:1px solid #e6e8e1;padding:10px 0"><strong>${esc(t.name)}</strong>
+          <div class="chips" style="margin-top:6px">${clsInfo.classes.map((c) => `<label style="display:inline-flex;gap:4px;align-items:center;margin-right:12px"><input type="checkbox" class="cls cls-${t.id}" value="${esc(c)}" ${t.classes.includes(c) ? 'checked' : ''}> ${esc(c)}</label>`).join('') || '<span class="small muted">No classes in your parent list yet.</span>'}</div>
+          <button class="btn ghost" style="margin-top:8px" data-a="cls-save" data-uid="${t.id}">Save classes</button></div>`).join('') : '<p class="small muted">No teachers yet.</p>'}</div>`;
+    const optinCard = () => `<div class="card"><h3>Parent opt-in link</h3>
+        <p class="small muted" style="margin:6px 0 10px">Give parents a link where they type their child's name and phone number and agree to receive messages. When it matches a parent in your list, their consent is recorded with the date. Anything else waits on the Parents page for you to approve. Anyone with the link can use it, so share it only with parents.</p>
+        ${optin.link ? `<p><code id="optinUrl">${esc(optin.link)}</code></p><div class="row"><button class="btn" data-a="optin-copy">Copy link</button> <button class="btn ghost" data-a="optin-new">Make a new link</button> <button class="btn ghost" data-a="optin-off">Turn off</button></div>`
+          : `<button class="btn" data-a="optin-on">Turn on</button>`}
+        <p class="small muted" style="margin:10px 0 0">This records consent. It is not legal advice; check your wording with your data protection adviser.</p></div>`;
     const usageCard = () => {
       const [cur, prev] = usage.months, price = usage.price;
       const MN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -592,6 +613,8 @@
         <p style="margin:10px 0 4px">AI drafting ${pv(providers.ai)} &nbsp; SMS (Termii) ${pv(providers.sms)} &nbsp; WhatsApp ${pv(providers.whatsapp)}</p>
         <p class="small muted" style="margin:0">Dry-run means messages are logged on the server but not delivered. Add the API keys in the server environment to go live.</p></div>
       ${usage ? usageCard() : ''}
+      ${clsInfo ? clsCard() : ''}
+      ${optin ? optinCard() : ''}
       ${smsHook ? `<div class="card"><h3>SMS delivery reports</h3>
         <p class="small muted" style="margin:6px 0 10px">So that SMS messages change from Sent to Delivered (or Failed, with the reason), tell Termii where to send its delivery reports: in your Termii account, open the webhook settings and paste this address. Keep it private.</p>
         <p><code id="smsHookUrl">${esc(smsHook.url)}</code></p>
@@ -720,6 +743,34 @@
       if (!body.schoolName.trim() || !body.adminName.trim() || !body.email.trim()) return toast('Fill in the school name, the administrator’s name and email', true);
       S.welcome = await api('/platform/schools', { method: 'POST', body });
       toast(`School created: ${S.welcome.school.name}`); await viewPlatform();
+    }
+    else if (a === 'cls-save') {
+      const list = [...document.querySelectorAll('.cls-' + el.dataset.uid)].filter((x) => x.checked).map((x) => x.value);
+      await api('/staff-classes/' + el.dataset.uid, { method: 'PUT', body: { classes: list } });
+      toast(list.length ? 'Classes saved' : 'Saved: this teacher now sees every class'); await viewSettings();
+    }
+    else if (a === 'optin-on' || a === 'optin-new') {
+      if (a === 'optin-new' && !confirm('Make a new link? The old link will stop working.')) return;
+      await api('/optin/enable', { method: 'POST' }); toast('Link ready'); await viewSettings();
+    }
+    else if (a === 'optin-off') {
+      if (!confirm('Turn off the opt-in link? Parents will no longer be able to use it.')) return;
+      await api('/optin', { method: 'DELETE' }); toast('Link turned off'); await viewSettings();
+    }
+    else if (a === 'optin-copy') {
+      const t = ($('#optinUrl') || {}).textContent || '';
+      try { await navigator.clipboard.writeText(t); toast('Link copied'); } catch { toast('Select the link and copy it (Ctrl + C)', true); }
+    }
+    else if (a === 'optin-ignore') { await api('/optin/' + el.dataset.id + '/ignore', { method: 'POST' }); toast('Ignored'); await viewParents(); }
+    else if (a === 'optin-approve') {
+      try { await api('/optin/' + el.dataset.id + '/approve', { method: 'POST', body: {} }); }
+      catch (e) {
+        if (!/Type a class/.test(e.message)) throw e;
+        const cls = (prompt('No parent has this phone number yet. Type the class to add this child to:', '') || '').trim();
+        if (!cls) return;
+        await api('/optin/' + el.dataset.id + '/approve', { method: 'POST', body: { class_name: cls } });
+      }
+      toast('Consent recorded'); await viewParents();
     }
     else if (a === 'copy-welcome') {
       try { await navigator.clipboard.writeText(S.welcome.welcome); toast('Message copied'); }
