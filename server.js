@@ -932,6 +932,43 @@ const prettyPhone = (p) => {
   return /^234\d{10}$/.test(d) ? `+234 ${d.slice(3, 6)} ${d.slice(6, 9)} ${d.slice(9)}` : (d ? '+' + d : '');
 };
 
+// ---------------------------------------------------------------- download your lists (administrators): parents, groups, classes
+// The first eight columns of the parents file are the same as the import template, so the file can be corrected in Excel and imported again.
+const sendCsv = (res, name, lines) => {
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="${name}-${todayStr()}.csv"`);
+  res.send('\ufeff' + lines.join('\r\n') + '\r\n');
+};
+app.get('/api/export/parents.csv', requireAuth, requireAdmin, (req, res) => {
+  const sid = req.user.school_id;
+  const groups = {};
+  for (const g of db.prepare('SELECT mm.contact_id AS cid, g.name FROM parent_group_members mm JOIN parent_groups g ON g.id=mm.group_id WHERE g.school_id=? ORDER BY lower(g.name)').all(sid)) (groups[g.cid] = groups[g.cid] || []).push(g.name);
+  const rows = db.prepare('SELECT * FROM contacts WHERE school_id=? ORDER BY class_name, student_name, id').all(sid);
+  const lines = ['student_name,class,parent_name,phone,admission_no,channel,consent,birthday,consent_date,opted_out,groups'];
+  for (const c of rows) {
+    lines.push([c.student_name, c.class_name, c.parent_name].map(csvCell).concat([prettyPhone(c.phone)],
+      [c.admission_no, c.channel, c.consent_source || 'no', bdayShow(c.birthday), c.consent_at || '', c.opted_out ? 'yes' : 'no', (groups[c.id] || []).join('; ')].map(csvCell)).join(','));
+  }
+  logActivity(req.user, 'exported', `Downloaded the parents list (${plural(rows.length, 'row')})`);
+  sendCsv(res, 'parent-bot-parents', lines);
+});
+app.get('/api/export/groups.csv', requireAuth, requireAdmin, (req, res) => {
+  const rows = db.prepare(`SELECT g.name AS grp, c.student_name, c.class_name, c.parent_name, c.phone FROM parent_groups g
+    JOIN parent_group_members mm ON mm.group_id=g.id JOIN contacts c ON c.id=mm.contact_id WHERE g.school_id=? AND c.school_id=g.school_id ORDER BY lower(g.name), c.class_name, c.student_name`).all(req.user.school_id);
+  const lines = ['group,student_name,class,parent_name,phone'];
+  for (const r of rows) lines.push([r.grp, r.student_name, r.class_name, r.parent_name].map(csvCell).concat([prettyPhone(r.phone)]).join(','));
+  logActivity(req.user, 'exported', `Downloaded the groups list (${plural(rows.length, 'row')})`);
+  sendCsv(res, 'parent-bot-groups', lines);
+});
+app.get('/api/export/classes.csv', requireAuth, requireAdmin, (req, res) => {
+  const rows = db.prepare(`SELECT class_name AS name, COUNT(*) AS total, SUM(opted_out=0) AS reachable, SUM(consent_at IS NOT NULL) AS with_consent, SUM(opted_out=1) AS opted_out
+    FROM contacts WHERE school_id=? GROUP BY class_name ORDER BY class_name`).all(req.user.school_id);
+  const lines = ['class,parents,can_receive_messages,consent_recorded,opted_out'];
+  for (const r of rows) lines.push([r.name || '(no class)', r.total, r.reachable || 0, r.with_consent || 0, r.opted_out || 0].map(csvCell).join(','));
+  logActivity(req.user, 'exported', `Downloaded the classes list (${plural(rows.length, 'row')})`);
+  sendCsv(res, 'parent-bot-classes', lines);
+});
+
 app.get('/api/messages/export.csv', requireAuth, (req, res) => {
   const f = historyFilter(req.user.school_id, req.query, req.user);
   const rows = db.prepare(`SELECT ${WHEN_SQL} AS at, m.status, m.channel, m.phone, m.body, m.error, c.parent_name, c.student_name, c.class_name, ${KIND_SQL} AS kind

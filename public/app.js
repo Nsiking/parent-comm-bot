@@ -243,7 +243,7 @@
   }
 
   // ---------- activity (administrators): who did what
-  const ACT = { drafted: 'Drafted', requested: 'Asked for approval', sent: 'Sent', scheduled: 'Scheduled', unscheduled: 'Cancelled a schedule', discarded: 'Discarded', settings: 'Changed settings', imported: 'Imported parents', parent_deleted: 'Deleted a parent', group: 'Groups', retried: 'Sent again', reply: 'Replies' };
+  const ACT = { drafted: 'Drafted', requested: 'Asked for approval', sent: 'Sent', scheduled: 'Scheduled', unscheduled: 'Cancelled a schedule', discarded: 'Discarded', settings: 'Changed settings', imported: 'Imported parents', parent_deleted: 'Deleted a parent', group: 'Groups', retried: 'Sent again', reply: 'Replies', exported: 'Downloaded a list' };
   async function viewActivity() {
     const a = (S.act = S.act || { user: 0, rows: [], total: 0, people: [] });
     const d = await api('/activity?limit=50&offset=0' + (a.user ? '&user=' + a.user : ''));
@@ -587,7 +587,10 @@
           <td><span class="pill ${c.channel === 'sms' ? 'sms' : 'wa'}">${c.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span>${c.opted_out ? ' <span class="pill failed">opted out</span>' : ''}</td>
           <td><select class="consent-sel" aria-label="Consent">${consentOptions(c.consent_source || '')}</select>${c.consent_at ? `<div class="small muted">${esc(c.consent_at)}</div>` : ''}</td>
           <td style="text-align:right;white-space:nowrap"><button class="btn ghost" data-a="chist">History</button> <button class="btn ghost" data-a="optout">${c.opted_out ? 'Opt in' : 'Opt out'}</button> <button class="btn danger" data-a="delcontact">Delete</button></td></tr>`).join('')}
-        </tbody></table></div>` : `<div class="card empty">No parents found.</div>`}`;
+        </tbody></table></div>` : `<div class="card empty">No parents found.</div>`}
+      ${S.me.user.role === 'admin' ? `<div class="card"><h3>Download your lists</h3>
+        <p class="small muted" style="margin:6px 0 10px">Spreadsheet files (CSV) that open in Excel. The parents file can be corrected and imported again. Each download is recorded on the Activity page.</p>
+        <div class="row"><a class="btn ghost" href="/api/export/parents.csv" download>All parents</a> <a class="btn ghost" href="/api/export/groups.csv" download>Groups</a> <a class="btn ghost" href="/api/export/classes.csv" download>Classes</a></div></div>` : ''}`;
     $('#addForm').addEventListener('submit', guard(async (e) => {
       e.preventDefault();
       await api('/contacts', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) });
