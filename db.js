@@ -127,6 +127,26 @@ db.exec(`CREATE TABLE IF NOT EXISTS parent_replies (
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_replies_wa ON parent_replies(school_id, wa_id) WHERE wa_id IS NOT NULL');
 db.exec('CREATE INDEX IF NOT EXISTS idx_replies_school ON parent_replies(school_id, id)');
 
+// Message approval, quiet hours and parent groups. Everything here is ADDED; both settings are off until a school switches them on.
+if (!hasCol('schools', 'require_approval')) db.exec('ALTER TABLE schools ADD COLUMN require_approval INTEGER NOT NULL DEFAULT 0');
+if (!hasCol('schools', 'quiet_start')) db.exec('ALTER TABLE schools ADD COLUMN quiet_start TEXT');
+if (!hasCol('schools', 'quiet_end')) db.exec('ALTER TABLE schools ADD COLUMN quiet_end TEXT');
+if (!hasCol('messages', 'approval_requested_at')) db.exec('ALTER TABLE messages ADD COLUMN approval_requested_at TEXT');
+if (!hasCol('messages', 'approval_requested_by')) db.exec('ALTER TABLE messages ADD COLUMN approval_requested_by INTEGER');
+db.exec(`CREATE TABLE IF NOT EXISTS parent_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  school_id INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_name ON parent_groups(school_id, name COLLATE NOCASE)');
+db.exec(`CREATE TABLE IF NOT EXISTS parent_group_members (
+  group_id INTEGER NOT NULL REFERENCES parent_groups(id) ON DELETE CASCADE,
+  contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+  PRIMARY KEY (group_id, contact_id)
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_group_members_contact ON parent_group_members(contact_id)');
+
 // Anything left "queued" by a crash/restart goes back to draft so nothing is silently lost.
 db.prepare("UPDATE messages SET status='draft' WHERE status='queued'").run();
 

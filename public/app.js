@@ -2,7 +2,7 @@
   const $ = (s, r = document) => r.querySelector(s);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const root = $('#root');
-  const S = { me: null, view: 'compose', group: 'draft', classes: [], picked: new Set(['*']), tpls: [], tplsLoaded: false, msgs: [], counts: {}, contacts: [], poll: null };
+  const S = { me: null, view: 'compose', group: 'draft', classes: [], picked: new Set(['*']), groups: [], pickedG: new Set(), pgroup: 0, approvals: 0, tpls: [], tplsLoaded: false, msgs: [], counts: {}, contacts: [], poll: null };
 
   async function api(path, opts = {}) {
     const r = await fetch('/api' + path, {
@@ -55,12 +55,13 @@
     try { S.me = await api('/me'); } catch { return renderAuth(); }
     S.view = S.me.owner ? 'platform' : 'compose';
     S.classes = await api('/classes');
+    try { S.groups = await api('/groups'); } catch { S.groups = []; }
     await refreshCounts();
     renderShell();
   }
   async function refreshCounts() {
     const d = await api('/messages?group=' + S.group);
-    S.msgs = d.messages; S.counts = d.counts;
+    S.msgs = d.messages; S.counts = d.counts; S.approvals = d.approvals || 0;
     try { S.unread = (await api('/replies/summary')).unread; } catch { S.unread = 0; }
   }
   const roleLabel = (r) => (r === 'admin' ? 'Administrator' : 'Teacher');
@@ -130,7 +131,9 @@
         ${S.classes.length ? `<div class="chips" style="margin-top:10px">
           <button class="chip ${pickedAll ? 'on' : ''}" data-a="pick" data-c="*">Whole school (${S.classes.reduce((n, c) => n + reach(c), 0)})</button>
           ${S.classes.map((c) => `<button class="chip ${S.picked.has(c.name) ? 'on' : ''}" data-a="pick" data-c="${esc(c.name)}">${esc(c.name || 'No class')} (${reach(c)})</button>`).join('')}
-        </div>` : `<p class="muted">No parents yet. <button class="link" data-a="nav" data-v="parents">Add or import parents</button> first.</p>`}
+        </div>
+        ${S.groups.length ? `<p class="small muted" style="margin:12px 0 0">Groups (make them on the Parents page)</p><div class="chips" style="margin-top:6px">
+          ${S.groups.map((g) => `<button class="chip ${S.pickedG.has(g.id) ? 'on' : ''}" data-a="pick-group" data-g="${g.id}">${esc(g.name)} (${g.reachable})</button>`).join('')}</div>` : ''}` : `<p class="muted">No parents yet. <button class="link" data-a="nav" data-v="parents">Add or import parents</button> first.</p>`}
       </div>
       <div class="card"><h3>Templates</h3>
         <p class="small muted" style="margin:6px 0 10px">Start from a ready message and change it, or save what you have written below so you and your colleagues can use it again.</p>
@@ -151,6 +154,11 @@
     $('#kind').addEventListener('change', sync); sync();
     if (!S.tplsLoaded) loadTpls().catch(() => {});
   }
+  // Redraw Compose after a chip is clicked, keeping what was typed.
+  function keepCompose() {
+    const keep = { k: $('#kind').value, t: $('#tone').value, l: $('#language').value, f: $('#facts').value, n: $('#notes')?.value };
+    viewCompose(); $('#kind').value = keep.k; $('#tone').value = keep.t; $('#language').value = keep.l; $('#facts').value = keep.f; if ($('#notes')) $('#notes').value = keep.n || ''; $('#kind').dispatchEvent(new Event('change'));
+  }
   const draft = guard(async () => {
     const gap = /\[[^\]]*\]/.exec($('#facts').value);
     if (gap) throw new Error('Fill in the part in square brackets, ' + gap[0] + ', before drafting.');
@@ -159,7 +167,7 @@
       const d = await api('/drafts', { method: 'POST', body: {
         kind: $('#kind').value, tone: $('#tone').value, language: $('#language').value,
         facts: $('#facts').value, notesText: $('#notes')?.value || '',
-        classes: [...S.picked],
+        classes: S.picked.has('*') ? ['*'] : [...S.picked], groups: [...S.pickedG],
       } });
       toast(`${d.count} drafts ready${d.aiDrafted < d.count ? ` (${d.count - d.aiDrafted} from templates)` : ''}. Review before sending.${d.noConsent ? ` ${d.noConsent} left out: no consent recorded.` : ''}`);
       S.group = 'draft'; await refreshCounts(); setView('messages');
@@ -195,12 +203,19 @@
   function viewMessages() {
     const g = S.group, c = S.counts;
     const isDraft = g === 'draft', isSched = g === 'scheduled';
+    const sch = S.me.school, isAdmin = S.me.user.role === 'admin', needAppr = !!sch.require_approval && !isAdmin;
+    const notes = isDraft ? [
+      needAppr ? 'Your school asks an administrator to approve messages. Tick the messages you want approved and click Ask for approval. The administrator reviews and sends them.' : '',
+      isAdmin && sch.require_approval && S.approvals ? `${S.approvals} message${S.approvals === 1 ? ' is' : 's are'} waiting for your approval. Review them below, then click Send selected.` : '',
+      sch.quiet_start && sch.quiet_end ? `Quiet hours: nothing is sent between ${esc(sch.quiet_start)} and ${esc(sch.quiet_end)} (Nigerian time).` : '',
+    ].filter(Boolean) : [];
     $('#view').innerHTML = `
       <div class="head"><div><h1>Messages</h1><p class="muted">Edit any message, then send. Parents who opted out are skipped automatically.</p></div>
-        ${isDraft && S.msgs.length ? `<div class="row"><label class="check"><input type="checkbox" id="all" checked data-a="toggle-all"> Select all</label><button class="btn" data-a="send">Send selected</button><button class="btn ghost" data-a="sched-open">Send later</button></div>` : ''}
+        ${isDraft && S.msgs.length ? `<div class="row"><label class="check"><input type="checkbox" id="all" checked data-a="toggle-all"> Select all</label>${needAppr ? '<button class="btn" data-a="ask-approval">Ask for approval</button>' : '<button class="btn" data-a="send">Send selected</button><button class="btn ghost" data-a="sched-open">Send later</button>'}</div>` : ''}
         ${isSched && S.msgs.length ? `<div class="row"><label class="check"><input type="checkbox" id="all" checked data-a="toggle-all"> Select all</label><button class="btn ghost" data-a="unschedule">Cancel schedule</button></div>` : ''}
       </div>
-      ${isDraft && S.msgs.length ? `<div class="card" id="schedPanel" hidden><h3>Send later</h3>
+      ${notes.length ? `<div class="card small" id="msgNotes">${notes.map((t) => `<p style="margin:2px 0">${t}</p>`).join('')}</div>` : ''}
+      ${isDraft && S.msgs.length && !needAppr ? `<div class="card" id="schedPanel" hidden><h3>Send later</h3>
         <p class="small muted" style="margin:6px 0 10px">Choose when the selected messages should go out. Times are Nigerian time. Opt-outs, consent and your daily limit are checked again at that moment.</p>
         <div class="row"><label>Date and time<input type="datetime-local" id="schedAt" value="${schedDefault()}" min="${watNow()}"></label><button class="btn" data-a="sched-go">Schedule selected</button></div></div>` : ''}
       <div class="chips" style="margin-bottom:14px">
@@ -212,11 +227,12 @@
           <span class="pill ${m.channel === 'sms' ? 'sms' : 'wa'}">${m.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span>
           ${!isDraft ? `<span class="pill ${m.status === 'scheduled' ? 'queued' : m.status}">${m.status === 'scheduled' ? 'Sends ' + esc(String(m.scheduled_wat).slice(0, 16)) : m.status}</span>` : ''}
           ${m.ai ? '<span class="pill">AI draft</span>' : ''}
+          ${(isDraft || g === 'failed') && m.approval_requested_at ? `<span class="pill queued" title="${esc(m.approval_by ? 'Asked by ' + m.approval_by : '')}">Waiting for approval</span>${isAdmin && m.approval_by ? `<span class="small muted">asked by ${esc(m.approval_by)}</span>` : ''}` : ''}
           <span class="spacer"></span><span class="small muted">+${esc(m.phone)}</span></header>
         ${isDraft || g === 'failed' ? `<textarea>${esc(m.body)}</textarea>` : `<div style="white-space:pre-wrap">${esc(m.body)}</div>`}
         ${m.error ? `<div class="${m.status === 'failed' || m.status === 'skipped' ? 'err' : 'small muted'}" style="margin-top:6px">${esc(m.error)}</div>` : ''}
         <footer>${isDraft || g === 'failed' ? `<span class="small muted count">${counter(m, m.body)}</span><span class="spacer"></span>
-          ${g === 'failed' && m.status === 'failed' ? `<button class="btn ghost" data-a="retry">Retry</button>` : ''}
+          ${g === 'failed' && m.status === 'failed' ? (needAppr ? `<button class="btn ghost" data-a="ask-approval-one">Ask for approval</button>` : `<button class="btn ghost" data-a="retry">Retry</button>`) : ''}
           <button class="btn danger" data-a="discard">Discard</button>` : isSched ? `<span class="spacer"></span><button class="btn ghost" data-a="unschedule-one">Cancel schedule</button>` : `<span class="small muted">${esc(m.sent_at || '')}</span>`}</footer></div>`).join('')
       : `<div class="card empty">${isDraft ? 'No drafts waiting. Start from Compose.' : isSched ? 'Nothing is scheduled.' : g === 'sent' ? 'Nothing sent yet.' : 'Nothing needs attention.'}</div>`}`;
     clearInterval(S.poll);
@@ -224,12 +240,14 @@
       S.poll = setInterval(async () => { await refreshCounts(); if (S.view === 'messages' && S.group === 'sent') viewMessages(); else clearInterval(S.poll); }, 4000);
     }
   }
+  const tickedParents = () => [...document.querySelectorAll('.cpick')].filter((c) => c.checked).map((c) => +c.closest('tr').dataset.id);
   const selectedIds = () => [...document.querySelectorAll('.msg')].filter((el) => $('.pick', el)?.checked).map((el) => +el.dataset.id);
   const send = guard(async (ids) => {
     ids = ids || selectedIds();
     if (!ids.length) return toast('Select at least one message', true);
     if (!confirm(`Send ${ids.length} message${ids.length > 1 ? 's' : ''} to parents now?`)) return;
     const r = await api('/messages/send', { method: 'POST', body: { ids } });
+    if (r.quiet) return toast(`Not sent: quiet hours (${r.quiet.start} to ${r.quiet.end}, Nigerian time). The messages stay in Drafts.`, true);
     toast(r.heldBack ? `Sending ${r.queued}. ${r.heldBack} held back by the daily limit of ${r.dailyLimit}.` : `Sending ${r.queued} message${r.queued > 1 ? 's' : ''}…`, !!r.heldBack);
     S.group = 'sent'; await refreshCounts(); setView('messages');
   });
@@ -260,6 +278,13 @@
   // ---------- send later (scheduled sending). Times are Nigerian time (UTC+1), whatever the browser's own time zone is.
   const watNow = () => new Date(Date.now() + 3600e3).toISOString().slice(0, 16);
   const schedDefault = () => { const t = new Date(Date.now() + 3600e3); t.setUTCDate(t.getUTCDate() + 1); t.setUTCHours(7, 0, 0, 0); return t.toISOString().slice(0, 16); };
+  const askApproval = guard(async (ids) => {
+    ids = ids || selectedIds();
+    if (!ids.length) return toast('Select at least one message', true);
+    const r = await api('/messages/request-approval', { method: 'POST', body: { ids } });
+    toast(`${r.requested} message${r.requested === 1 ? '' : 's'} sent to an administrator for approval`);
+    await refreshCounts(); setView('messages');
+  });
   const schedule = guard(async () => {
     const ids = selectedIds();
     if (!ids.length) return toast('Select at least one message', true);
@@ -393,7 +418,9 @@
   const todayLocal = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 
   async function viewParents(q = '') {
-    S.contacts = await api('/contacts?q=' + encodeURIComponent(q));
+    S.groups = await api('/groups');
+    if (S.pgroup && !S.groups.some((g) => g.id === S.pgroup)) S.pgroup = 0;
+    S.contacts = await api('/contacts?q=' + encodeURIComponent(q) + (S.pgroup ? '&group=' + S.pgroup : ''));
     S.classes = await api('/classes');
     const totalParents = S.classes.reduce((n, c) => n + c.total, 0), withConsent = S.classes.reduce((n, c) => n + (c.with_consent || 0), 0);
     $('#view').innerHTML = `
@@ -416,9 +443,16 @@
           <label>Date<input type="date" id="bkDate" value="${todayLocal()}" max="${todayLocal()}"></label>
           <div style="align-self:end"><button class="btn" data-a="bulkconsent">Mark consent obtained</button></div></div>
         <p class="small muted" style="margin:8px 0 0">Only parents with no record yet are updated. Use this only when the school really holds those parents' consent.</p>` : ''}</div>
-      <div class="row" style="margin-bottom:10px"><input id="q" placeholder="Search name, class, phone…" value="${esc(q)}" style="max-width:320px"><span class="muted small">${S.contacts.length} shown</span></div>
-      ${S.contacts.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>Student</th><th>Class</th><th>Parent</th><th>Phone</th><th>Channel</th><th>Consent</th><th></th></tr></thead><tbody>
-        ${S.contacts.map((c) => `<tr data-id="${c.id}"><td>${esc(c.student_name)}<div class="small muted">${esc(c.admission_no)}</div></td><td>${esc(c.class_name)}</td><td>${esc(c.parent_name)}</td><td>+${esc(c.phone)}</td>
+      <div class="card"><h3>Groups</h3>
+        <p class="small muted" style="margin:6px 0 10px">Tick parents in the list below, then add them to a group, for example a club, a bus route or fee reminders. In Compose each group appears next to the classes.</p>
+        <div class="row"><select id="grpSel" aria-label="Group"><option value="">Choose a group…</option>${S.groups.map((g) => `<option value="${g.id}">${esc(g.name)} (${g.total})</option>`).join('')}</select>
+          <input id="grpName" placeholder="or type a new group name" maxlength="40" style="max-width:240px"><button class="btn" data-a="grp-add">Add ticked parents to group</button></div>
+        ${S.groups.length ? `<div class="chips" style="margin-top:12px">${S.groups.map((g) => `<span class="chip" data-gid="${g.id}">${esc(g.name)} (${g.total}) <button class="link" data-a="grp-del" data-id="${g.id}" aria-label="Delete group ${esc(g.name)}">Delete</button></span>`).join('')}</div>` : ''}</div>
+      <div class="row" style="margin-bottom:10px"><input id="q" placeholder="Search name, class, phone…" value="${esc(q)}" style="max-width:320px">
+        ${S.groups.length ? `<select id="grpFilter" aria-label="Show group" style="max-width:220px"><option value="0">All parents</option>${S.groups.map((g) => `<option value="${g.id}" ${S.pgroup === g.id ? 'selected' : ''}>Group: ${esc(g.name)}</option>`).join('')}</select>` : ''}
+        ${S.pgroup ? '<button class="btn ghost" data-a="grp-remove">Remove ticked parents from this group</button>' : ''}<span class="muted small">${S.contacts.length} shown</span></div>
+      ${S.contacts.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th style="width:28px"><input type="checkbox" data-a="cpick-all" aria-label="Tick all shown" style="width:auto"></th><th>Student</th><th>Class</th><th>Parent</th><th>Phone</th><th>Channel</th><th>Consent</th><th></th></tr></thead><tbody>
+        ${S.contacts.map((c) => `<tr data-id="${c.id}"><td><input type="checkbox" class="cpick" aria-label="Tick parent" style="width:auto"></td><td>${esc(c.student_name)}<div class="small muted">${esc(c.admission_no)}</div></td><td>${esc(c.class_name)}</td><td>${esc(c.parent_name)}</td><td>+${esc(c.phone)}</td>
           <td><span class="pill ${c.channel === 'sms' ? 'sms' : 'wa'}">${c.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span>${c.opted_out ? ' <span class="pill failed">opted out</span>' : ''}</td>
           <td><select class="consent-sel" aria-label="Consent">${consentOptions(c.consent_source || '')}</select>${c.consent_at ? `<div class="small muted">${esc(c.consent_at)}</div>` : ''}</td>
           <td style="text-align:right;white-space:nowrap"><button class="btn ghost" data-a="optout">${c.opted_out ? 'Opt in' : 'Opt out'}</button> <button class="btn danger" data-a="delcontact">Delete</button></td></tr>`).join('')}
@@ -489,6 +523,10 @@
         <label>Default language<select name="default_language">${S.me.languages.map((l) => `<option ${school.default_language === l ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
         <label class="check" style="align-self:end"><input type="checkbox" name="auto_send_absence" ${school.auto_send_absence ? 'checked' : ''}> Send absence alerts automatically (no review)</label>
         <label class="check" style="align-self:end"><input type="checkbox" name="require_consent" ${school.require_consent ? 'checked' : ''}> Only send to parents with consent recorded</label>
+        <label class="check" style="align-self:end"><input type="checkbox" name="require_approval" ${school.require_approval ? 'checked' : ''}> Teachers need approval before sending (an administrator reviews and sends)</label>
+        <label class="check" style="align-self:end"><input type="checkbox" name="quiet_on" ${school.quiet_start && school.quiet_end ? 'checked' : ''}> Quiet hours: do not send between</label>
+        <label>From (Nigerian time)<input type="time" name="quiet_start" value="${esc(school.quiet_start || '21:00')}"></label>
+        <label>Until (Nigerian time)<input type="time" name="quiet_end" value="${esc(school.quiet_end || '06:00')}"></label>
         <div><button class="btn" type="submit">Save settings</button></div></form></div>
       <div class="card"><h3>Class Register connection</h3>
         <p class="small muted" style="margin:6px 0 10px">Your Class Register calls this address when a pupil is marked absent (A) or late (L). A drafted alert then appears in Messages, or is sent straight away if auto-send is on.</p>
@@ -499,7 +537,7 @@
         <form id="staffForm" class="grid" style="margin-top:12px"><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label>${pwField('Temporary password', 'new-password')}<div style="align-self:end"><button class="btn" type="submit">Add teacher</button></div></form></div>` : `<div class="card muted">Only school admins can change settings.</div>`}`;
     $('#schoolForm')?.addEventListener('submit', guard(async (e) => {
       e.preventDefault();
-      const b = Object.fromEntries(new FormData(e.target)); b.auto_send_absence = !!b.auto_send_absence; b.require_consent = !!b.require_consent;
+      const b = Object.fromEntries(new FormData(e.target)); b.auto_send_absence = !!b.auto_send_absence; b.require_consent = !!b.require_consent; b.require_approval = !!b.require_approval; b.quiet_on = !!b.quiet_on;
       await api('/school', { method: 'PUT', body: b }); S.me = await api('/me'); toast('Settings saved'); renderShell();
     }));
     $('#staffForm')?.addEventListener('submit', guard(async (e) => {
@@ -526,10 +564,15 @@
     else if (a === 'logout') { await api('/auth/logout', { method: 'POST' }); S.me = null; renderAuth(); }
     else if (a === 'pick') {
       const c = el.dataset.c;
-      if (c === '*') S.picked = new Set(['*']);
-      else { S.picked.delete('*'); S.picked.has(c) ? S.picked.delete(c) : S.picked.add(c); if (!S.picked.size) S.picked.add('*'); }
-      const keep = { k: $('#kind').value, t: $('#tone').value, l: $('#language').value, f: $('#facts').value, n: $('#notes')?.value };
-      viewCompose(); $('#kind').value = keep.k; $('#tone').value = keep.t; $('#language').value = keep.l; $('#facts').value = keep.f; if ($('#notes')) $('#notes').value = keep.n || ''; $('#kind').dispatchEvent(new Event('change'));
+      if (c === '*') { S.picked = new Set(['*']); S.pickedG = new Set(); }
+      else { S.picked.delete('*'); S.picked.has(c) ? S.picked.delete(c) : S.picked.add(c); if (!S.picked.size && !S.pickedG.size) S.picked.add('*'); }
+      keepCompose();
+    }
+    else if (a === 'pick-group') {
+      const g = +el.dataset.g;
+      S.picked.delete('*'); S.pickedG.has(g) ? S.pickedG.delete(g) : S.pickedG.add(g);
+      if (!S.picked.size && !S.pickedG.size) S.picked.add('*');
+      keepCompose();
     }
     else if (a === 'reply-read') { await api('/replies/read', { method: 'POST', body: { ids: [+el.dataset.id] } }); renderShell(); }
     else if (a === 'reply-read-all') { await api('/replies/read', { method: 'POST', body: { all: true } }); renderShell(); }
@@ -563,6 +606,8 @@
     else if (a === 'toggle-all') document.querySelectorAll('.msg .pick').forEach((c) => (c.checked = el.checked));
     else if (a === 'send') await send();
     else if (a === 'retry') await send([+msgEl.dataset.id]);
+    else if (a === 'ask-approval') await askApproval();
+    else if (a === 'ask-approval-one') await askApproval([+msgEl.dataset.id]);
     else if (a === 'sched-open') { const p = $('#schedPanel'); p.hidden = !p.hidden; }
     else if (a === 'sched-go') await schedule();
     else if (a === 'unschedule') await unschedule(selectedIds());
@@ -663,6 +708,27 @@
       toast(`Consent recorded for ${r.updated} parent${r.updated === 1 ? '' : 's'}`);
       viewParents();
     }
+    else if (a === 'cpick-all') document.querySelectorAll('.cpick').forEach((c) => (c.checked = el.checked));
+    else if (a === 'grp-add') {
+      const ids = tickedParents(); if (!ids.length) return toast('Tick at least one parent first', true);
+      const gid = +($('#grpSel').value || 0), name = ($('#grpName').value || '').trim();
+      if (gid && name) return toast('Choose a group or type a new name, not both', true);
+      if (!gid && !name) return toast('Choose a group or type a name for a new one', true);
+      const r = await api('/groups/add', { method: 'POST', body: { contactIds: ids, ...(gid ? { groupId: gid } : { name }) } });
+      toast(`${r.added} added to "${r.group.name}"${r.already ? `, ${r.already} already in it` : ''}`); viewParents($('#q').value);
+    }
+    else if (a === 'grp-remove') {
+      const ids = tickedParents(); if (!ids.length) return toast('Tick at least one parent first', true);
+      const r = await api('/groups/remove', { method: 'POST', body: { groupId: S.pgroup, contactIds: ids } });
+      toast(`${r.removed} removed from the group`); viewParents($('#q').value);
+    }
+    else if (a === 'grp-del') {
+      const g = S.groups.find((x) => x.id === +el.dataset.id);
+      if (confirm(`Delete the group "${g ? g.name : ''}"? The parents themselves are not deleted.`)) {
+        await api('/groups/' + el.dataset.id, { method: 'DELETE' });
+        S.pickedG.delete(+el.dataset.id); if (S.pgroup === +el.dataset.id) S.pgroup = 0; viewParents($('#q').value);
+      }
+    }
     else if (a === 'optout') { const c = S.contacts.find((x) => x.id === +rowEl.dataset.id); await api('/contacts/' + c.id, { method: 'PUT', body: { opted_out: c.opted_out ? 0 : 1 } }); viewParents($('#q').value); }
     else if (a === 'delcontact') { if (confirm('Delete this parent?')) { await api('/contacts/' + rowEl.dataset.id, { method: 'DELETE' }); S.classes = await api('/classes'); viewParents($('#q').value); } }
     else if (a === 'rotate') { if (confirm('The old key stops working immediately. Continue?')) { const r = await api('/school/rotate-key', { method: 'POST' }); S.me.school.api_key = r.api_key; $('#key').textContent = r.api_key; toast('New key generated. Update it in your Class Register.'); } }
@@ -683,6 +749,7 @@
       if (/^\d{4}-\d{2}$/.test(v)) { S.hist.month = v; S.hist.sum = await api('/messages/summary?month=' + v); renderHistory(); }
       return;
     }
+    if (e.target.closest('#grpFilter')) { S.pgroup = +e.target.value || 0; await viewParents($('#q').value); return; }
     const cs = e.target.closest('select.consent-sel');
     if (cs) {
       await api('/contacts/' + cs.closest('tr').dataset.id, { method: 'PUT', body: { consent_source: cs.value } });
@@ -692,8 +759,9 @@
     }
     const ta = e.target.closest('.msg textarea'); if (!ta) return;
     const id = +ta.closest('.msg').dataset.id;
-    await api('/messages/' + id, { method: 'PUT', body: { body: ta.value } });
+    const saved = await api('/messages/' + id, { method: 'PUT', body: { body: ta.value } });
     const m = S.msgs.find((x) => x.id === id); if (m) { m.body = ta.value; m.ai = 0; }
+    if (saved.approvalReset) { if (m) { m.approval_requested_at = null; m.approval_by = null; } await refreshCounts(); toast('Saved. You changed the text, so ask for approval again.'); viewMessages(); return; }
     toast('Saved');
   }));
 

@@ -88,6 +88,17 @@ app.get('/api/me', requireAuth, (req, res) => {
 // ---------------------------------------------------------------- school settings & staff
 app.put('/api/school', requireAuth, requireAdmin, (req, res) => {
   const b = req.body || {};
+  // quiet hours are checked first, so a bad time saves nothing at all
+  let quiet = null;
+  if ('quiet_on' in b || 'quiet_start' in b || 'quiet_end' in b) {
+    const s = String(b.quiet_start || '').trim(), e = String(b.quiet_end || '').trim();
+    if (b.quiet_on === false || b.quiet_on === 0) quiet = { s: null, e: null };
+    else {
+      if (!HHMM.test(s) || !HHMM.test(e)) return res.status(400).json({ error: 'Quiet hours need a start and an end time, like 21:00 and 06:00' });
+      if (s === e) return res.status(400).json({ error: 'The start and end of quiet hours must be different times' });
+      quiet = { s, e };
+    }
+  }
   const sender = String(b.sender_id || 'SmartClass').replace(/[^A-Za-z0-9]/g, '').slice(0, 11) || 'SmartClass';
   db.prepare(`UPDATE schools SET name=?, sender_id=?, signature=?, default_tone=?, default_language=?, auto_send_absence=? WHERE id=?`)
     .run(String(b.name || '').trim() || 'My School', sender, String(b.signature || '').trim(),
@@ -95,6 +106,8 @@ app.put('/api/school', requireAuth, requireAdmin, (req, res) => {
       ai.LANGUAGES.includes(b.default_language) ? b.default_language : 'English',
       b.auto_send_absence ? 1 : 0, req.user.school_id);
   if ('require_consent' in b) db.prepare('UPDATE schools SET require_consent=? WHERE id=?').run(b.require_consent ? 1 : 0, req.user.school_id);
+  if ('require_approval' in b) db.prepare('UPDATE schools SET require_approval=? WHERE id=?').run(b.require_approval ? 1 : 0, req.user.school_id);
+  if (quiet) db.prepare('UPDATE schools SET quiet_start=?, quiet_end=? WHERE id=?').run(quiet.s, quiet.e, req.user.school_id);
   res.json({ ok: true });
 });
 
@@ -127,9 +140,11 @@ app.get('/api/classes', requireAuth, (req, res) => {
 
 app.get('/api/contacts', requireAuth, (req, res) => {
   const q = `%${String(req.query.q || '').toLowerCase()}%`;
+  const gid = Number(req.query.group) || 0;
   res.json(db.prepare(`SELECT * FROM contacts WHERE school_id=? AND
       (lower(student_name) LIKE ? OR lower(parent_name) LIKE ? OR lower(class_name) LIKE ? OR phone LIKE ? OR lower(admission_no) LIKE ?)
-      ORDER BY class_name, student_name LIMIT 500`).all(req.user.school_id, q, q, q, q, q));
+      ${gid ? 'AND id IN (SELECT contact_id FROM parent_group_members WHERE group_id=?)' : ''}
+      ORDER BY class_name, student_name LIMIT 500`).all(req.user.school_id, q, q, q, q, q, ...(gid ? [gid] : [])));
 });
 
 // ---- consent record: where/when a parent agreed to receive messages
@@ -330,6 +345,59 @@ app.delete('/api/templates/:id', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------------------------------------------------------------- parent groups (any set of parents you choose, besides classes)
+const MAX_GROUPS = 50;
+function groupList(sid) {
+  return db.prepare(`SELECT g.id, g.name, COUNT(c.id) AS total, COALESCE(SUM(c.opted_out=0), 0) AS reachable
+    FROM parent_groups g LEFT JOIN parent_group_members mm ON mm.group_id=g.id LEFT JOIN contacts c ON c.id=mm.contact_id
+    WHERE g.school_id=? GROUP BY g.id ORDER BY lower(g.name)`).all(sid);
+}
+const idList = (v) => (Array.isArray(v) ? v : []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+app.get('/api/groups', requireAuth, (req, res) => res.json(groupList(req.user.school_id)));
+
+app.post('/api/groups/add', requireAuth, (req, res) => {
+  const sid = req.user.school_id;
+  const ids = idList(req.body?.contactIds);
+  if (!ids.length) return res.status(400).json({ error: 'Tick at least one parent first' });
+  let g;
+  const gid = Number(req.body?.groupId) || 0;
+  if (gid) {
+    g = db.prepare('SELECT * FROM parent_groups WHERE id=? AND school_id=?').get(gid, sid);
+    if (!g) return res.status(404).json({ error: 'That group no longer exists' });
+  } else {
+    const name = String(req.body?.name || '').replace(/\s+/g, ' ').trim();
+    if (!name) return res.status(400).json({ error: 'Choose a group or type a name for a new one' });
+    if (name.length > 40) return res.status(400).json({ error: 'The group name is too long (max 40 characters)' });
+    g = db.prepare('SELECT * FROM parent_groups WHERE school_id=? AND name=? COLLATE NOCASE').get(sid, name);
+    if (!g) {
+      if (db.prepare('SELECT COUNT(*) n FROM parent_groups WHERE school_id=?').get(sid).n >= MAX_GROUPS)
+        return res.status(400).json({ error: `A school can have up to ${MAX_GROUPS} groups. Delete one you no longer use.` });
+      const r = db.prepare('INSERT INTO parent_groups(school_id, name) VALUES (?,?)').run(sid, name);
+      g = { id: Number(r.lastInsertRowid), name };
+    }
+  }
+  const mine = db.prepare(`SELECT id FROM contacts WHERE school_id=? AND id IN (${placeholders(ids.length)})`).all(sid, ...ids).map((r) => r.id);
+  const ins = db.prepare('INSERT OR IGNORE INTO parent_group_members(group_id, contact_id) VALUES (?,?)');
+  let added = 0;
+  db.transaction(() => { for (const id of mine) added += ins.run(g.id, id).changes; })();
+  res.json({ ok: true, group: { id: g.id, name: g.name }, added, already: mine.length - added });
+});
+
+app.post('/api/groups/remove', requireAuth, (req, res) => {
+  const sid = req.user.school_id;
+  const g = db.prepare('SELECT id FROM parent_groups WHERE id=? AND school_id=?').get(Number(req.body?.groupId) || 0, sid);
+  if (!g) return res.status(404).json({ error: 'That group no longer exists' });
+  const ids = idList(req.body?.contactIds);
+  if (!ids.length) return res.status(400).json({ error: 'Tick at least one parent first' });
+  const r = db.prepare(`DELETE FROM parent_group_members WHERE group_id=? AND contact_id IN (${placeholders(ids.length)})`).run(g.id, ...ids);
+  res.json({ ok: true, removed: r.changes });
+});
+
+app.delete('/api/groups/:id', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM parent_groups WHERE id=? AND school_id=?').run(req.params.id, req.user.school_id);   // the parents themselves are not touched
+  res.json({ ok: true });
+});
+
 // ---------------------------------------------------------------- drafting
 function parseNotes(text, contacts) {
   const notes = {};
@@ -351,6 +419,7 @@ function parseNotes(text, contacts) {
 
 app.post('/api/drafts', requireAuth, wrap(async (req, res) => {
   const { kind, classes, contactIds, tone, language, facts, notesText } = req.body || {};
+  const groupIds = idList(req.body?.groups);
   if (!ai.KINDS[kind]) return res.status(400).json({ error: 'Choose a message type' });
   const factsText = String(facts || '').trim();
   if (kind !== 'progress' && kind !== 'absence' && kind !== 'late' && factsText.length < 3)
@@ -359,6 +428,12 @@ app.post('/api/drafts', requireAuth, wrap(async (req, res) => {
   let contacts;
   if (Array.isArray(contactIds) && contactIds.length) {
     contacts = db.prepare(`SELECT * FROM contacts WHERE school_id=? AND id IN (${placeholders(contactIds.length)})`).all(sid, ...contactIds);
+  } else if (groupIds.length && !(Array.isArray(classes) && classes.includes('*'))) {
+    // chosen groups, plus any chosen classes; a parent in two of them is drafted once
+    const cl = Array.isArray(classes) ? classes : [];
+    contacts = db.prepare(`SELECT DISTINCT c.* FROM contacts c WHERE c.school_id=? AND (
+        c.id IN (SELECT mm.contact_id FROM parent_group_members mm JOIN parent_groups g ON g.id=mm.group_id WHERE g.school_id=? AND g.id IN (${placeholders(groupIds.length)}))
+        ${cl.length ? `OR c.class_name IN (${placeholders(cl.length)})` : ''})`).all(sid, sid, ...groupIds, ...cl);
   } else if (Array.isArray(classes) && classes.length && !classes.includes('*')) {
     contacts = db.prepare(`SELECT * FROM contacts WHERE school_id=? AND class_name IN (${placeholders(classes.length)})`).all(sid, ...classes);
   } else {
@@ -397,23 +472,28 @@ const GROUPS = { draft: ['draft'], scheduled: ['scheduled'], sent: ['queued', 's
 
 app.get('/api/messages', requireAuth, (req, res) => {
   const statuses = GROUPS[req.query.group] || GROUPS.draft;
-  const rows = db.prepare(`SELECT m.*, c.student_name, c.parent_name, c.class_name, b.kind, datetime(m.scheduled_at, '+1 hour') AS scheduled_wat
-    FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id LEFT JOIN batches b ON b.id=m.batch_id
+  const rows = db.prepare(`SELECT m.*, c.student_name, c.parent_name, c.class_name, b.kind, datetime(m.scheduled_at, '+1 hour') AS scheduled_wat, ru.name AS approval_by
+    FROM messages m LEFT JOIN contacts c ON c.id=m.contact_id LEFT JOIN batches b ON b.id=m.batch_id LEFT JOIN users ru ON ru.id=m.approval_requested_by
     WHERE m.school_id=? AND m.status IN (${placeholders(statuses.length)})
     ORDER BY ${req.query.group === 'scheduled' ? 'm.scheduled_at ASC, m.id ASC' : 'm.id DESC'} LIMIT 300`).all(req.user.school_id, ...statuses);
   const counts = {};
   for (const [g, s] of Object.entries(GROUPS))
     counts[g] = db.prepare(`SELECT COUNT(*) n FROM messages WHERE school_id=? AND status IN (${placeholders(s.length)})`).get(req.user.school_id, ...s).n;
-  res.json({ messages: rows.map((m) => ({ ...m, ...(m.channel === 'sms' ? ch.smsSegments(m.body) : {}) })), counts });
+  const approvals = db.prepare("SELECT COUNT(*) n FROM messages WHERE school_id=? AND status IN ('draft','failed') AND approval_requested_at IS NOT NULL").get(req.user.school_id).n;
+  res.json({ messages: rows.map((m) => ({ ...m, ...(m.channel === 'sms' ? ch.smsSegments(m.body) : {}) })), counts, approvals });
 });
 
 app.put('/api/messages/:id', requireAuth, (req, res) => {
   const body = String(req.body?.body || '').trim();
   if (!body) return res.status(400).json({ error: 'Message cannot be empty' });
   if (body.length > 1000) return res.status(400).json({ error: 'Message is too long (max 1,000 characters)' });
+  const before = db.prepare("SELECT approval_requested_at AS a, body FROM messages WHERE id=? AND school_id=? AND status IN ('draft','failed')").get(req.params.id, req.user.school_id);
   const r = db.prepare("UPDATE messages SET body=?, ai=0 WHERE id=? AND school_id=? AND status IN ('draft','failed')").run(body, req.params.id, req.user.school_id);
   if (!r.changes) return res.status(404).json({ error: 'Message not editable' });
-  res.json({ ok: true });
+  // a changed text is no longer what the administrator was asked to approve
+  const reset = !!(before && before.a && before.body !== body);
+  if (reset) db.prepare('UPDATE messages SET approval_requested_at=NULL, approval_requested_by=NULL WHERE id=?').run(req.params.id);
+  res.json({ ok: true, approvalReset: reset });
 });
 
 app.delete('/api/messages/:id', requireAuth, (req, res) => {
@@ -451,7 +531,23 @@ async function dispatch(schoolId, ids) {
   }
 }
 
+// Quiet hours: a window (Nigerian time) in which nothing is sent. It may cross midnight (21:00 to 06:00). Off when either time is empty.
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+const toMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+function inQuiet(school, minutes) {
+  if (!school || !HHMM.test(school.quiet_start || '') || !HHMM.test(school.quiet_end || '')) return false;
+  const a = toMin(school.quiet_start), b = toMin(school.quiet_end);
+  if (a === b) return false;
+  return a < b ? minutes >= a && minutes < b : minutes >= a || minutes < b;
+}
+function watMinutesNow() { const w = new Date(Date.now() + 3600e3); return w.getUTCHours() * 60 + w.getUTCMinutes(); }
+const quietNow = (school) => inQuiet(school, watMinutesNow());
+const quietText = (school) => `Messages are not sent between ${school.quiet_start} and ${school.quiet_end} (Nigerian time). They stay in Drafts. Send them after ${school.quiet_end}.`;
+const schoolRow = (id) => db.prepare('SELECT * FROM schools WHERE id=?').get(id);
+
 function queueAndSend(schoolId, ids) {
+  const sch = schoolRow(schoolId);
+  if (quietNow(sch)) return { queued: 0, heldBack: 0, dailyLimit: Number(process.env.DAILY_LIMIT || 500), quiet: { start: sch.quiet_start, end: sch.quiet_end } };
   const rows = ids.length
     ? db.prepare(`SELECT id FROM messages WHERE school_id=? AND status IN ('draft','failed') AND id IN (${placeholders(ids.length)})`).all(schoolId, ...ids)
     : [];
@@ -468,7 +564,21 @@ function queueAndSend(schoolId, ids) {
 app.post('/api/messages/send', requireAuth, (req, res) => {
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
   if (!ids.length) return res.status(400).json({ error: 'Select at least one message' });
+  const sch = schoolRow(req.user.school_id);
+  if (sch.require_approval && req.user.role !== 'admin')
+    return res.status(403).json({ error: 'Your school needs an administrator to approve messages before they are sent. Use "Ask for approval".' });
+  if (quietNow(sch)) return res.status(409).json({ error: quietText(sch) });
   res.json(queueAndSend(req.user.school_id, ids));
+});
+
+// A teacher asks the administrator to approve drafts (used when the school setting "Teachers need approval" is on).
+app.post('/api/messages/request-approval', requireAuth, (req, res) => {
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+  if (!ids.length) return res.status(400).json({ error: 'Select at least one message' });
+  if (!schoolRow(req.user.school_id).require_approval) return res.status(400).json({ error: 'Approval is not switched on for this school' });
+  const r = db.prepare(`UPDATE messages SET approval_requested_at=datetime('now'), approval_requested_by=? WHERE school_id=? AND status IN ('draft','failed') AND id IN (${placeholders(ids.length)})`)
+    .run(req.user.id, req.user.school_id, ...ids);
+  res.json({ requested: r.changes });
 });
 
 // ---------------------------------------------------------------- history, CSV export and monthly summary
@@ -590,7 +700,7 @@ app.post('/api/hooks/absence', wrap(async (req, res) => {
   }
   if (!ids.length) return res.json({ ok: true, skipped: 'already_notified' });
   const result = school.auto_send_absence ? queueAndSend(school.id, ids) : null;
-  res.json({ ok: true, messageIds: ids, status: school.auto_send_absence ? 'queued' : 'draft', ...(result || {}) });
+  res.json({ ok: true, messageIds: ids, status: school.auto_send_absence && !result?.quiet ? 'queued' : 'draft', ...(result || {}) });
 }));
 
 // ---------------------------------------------------------------- WhatsApp webhook (delivery receipts + STOP)
@@ -765,12 +875,16 @@ const SCHEDULE_GRACE_HOURS = 6;   // if the server was off and a time is this ov
 app.post('/api/messages/schedule', requireAuth, (req, res) => {
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
   if (!ids.length) return res.status(400).json({ error: 'Select at least one message' });
+  const sch = schoolRow(req.user.school_id);
+  if (sch.require_approval && req.user.role !== 'admin')
+    return res.status(403).json({ error: 'Your school needs an administrator to approve messages before they are sent. Use "Ask for approval".' });
   const typed = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})$/.exec(String(req.body?.at || '').trim());
   const when = typed ? new Date(`${typed[1]}T${typed[2]}:00+01:00`) : null;
   if (!when || Number.isNaN(when.getTime())) return res.status(400).json({ error: 'Choose a date and time' });
   const ahead = when.getTime() - Date.now();
   if (ahead < 2 * 60 * 1000) return res.status(400).json({ error: 'Choose a time at least 2 minutes from now (Nigerian time)' });
   if (ahead > 90 * 24 * 3600 * 1000) return res.status(400).json({ error: 'Choose a date within the next 90 days' });
+  if (inQuiet(sch, toMin(typed[2]))) return res.status(409).json({ error: `That time is inside quiet hours (${sch.quiet_start} to ${sch.quiet_end}, Nigerian time). Choose a time outside them.` });
   const utc = when.toISOString().slice(0, 19).replace('T', ' ');
   const r = db.prepare(`UPDATE messages SET status='scheduled', scheduled_at=?, error=NULL WHERE school_id=? AND status='draft' AND id IN (${placeholders(ids.length)})`)
     .run(utc, req.user.school_id, ...ids);
@@ -798,6 +912,7 @@ function runScheduled() {
       } else (bySchool[d.school_id] = bySchool[d.school_id] || []).push(d.id);
     }
     for (const [sid, ids] of Object.entries(bySchool)) {
+      if (quietNow(schoolRow(Number(sid)))) continue;   // still scheduled; they go as soon as quiet hours end (unless that is later than the grace period)
       db.prepare(`UPDATE messages SET status='draft', scheduled_at=NULL WHERE status='scheduled' AND id IN (${placeholders(ids.length)})`).run(...ids);
       queueAndSend(Number(sid), ids);
       db.prepare(`UPDATE messages SET error='The daily sending limit was reached at the scheduled time. Send it again from Drafts.' WHERE status='draft' AND id IN (${placeholders(ids.length)})`).run(...ids);
