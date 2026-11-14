@@ -66,7 +66,7 @@
   }
   const roleLabel = (r) => (r === 'admin' ? 'Administrator' : 'Teacher');
   const NAV = [['compose', 'Compose'], ['messages', 'Messages'], ['replies', 'Replies'], ['history', 'History'], ['parents', 'Parents'], ['settings', 'Settings']];
-  const navItems = () => (S.me && S.me.owner ? [['platform', 'Platform'], ...NAV] : NAV);
+  const navItems = () => { const base = S.me && S.me.owner ? [['platform', 'Platform'], ...NAV] : NAV; return S.me && S.me.user.role === 'admin' ? base.flatMap((n) => (n[0] === 'history' ? [n, ['activity', 'Activity']] : [n])) : base; };
   function renderShell() {
     const m = S.me;
     root.innerHTML = `<div class="shell"><nav class="rail">
@@ -80,7 +80,7 @@
   function paintUnread() { const b = $('[data-v="replies"]'); if (b) b.innerHTML = 'Replies' + (S.unread ? `<span class="badge">${S.unread}</span>` : ''); }
   async function refreshUnread() { try { const d = await api('/replies/summary'); if (d.unread !== S.unread) { S.unread = d.unread; paintUnread(); } } catch { /* the badge stays as it was */ } }
   function renderView() {
-    ({ platform: viewPlatform, compose: viewCompose, messages: viewMessages, replies: viewReplies, history: viewHistory, parents: viewParents, settings: viewSettings })[S.view]();
+    ({ platform: viewPlatform, compose: viewCompose, messages: viewMessages, replies: viewReplies, history: viewHistory, activity: viewActivity, parents: viewParents, settings: viewSettings })[S.view]();
   }
   const setView = (v) => { S.view = v; clearInterval(S.poll); renderShell(); };
 
@@ -176,18 +176,44 @@
 
   // ---------- replies (what parents write back on WhatsApp)
   async function viewReplies() {
-    const d = await api('/replies'); S.unread = d.unread; paintUnread();
+    const [d, col] = await Promise.all([api('/replies'), api('/colleagues').catch(() => [])]);
+    S.unread = d.unread; paintUnread();
     const when = (at) => String(at).slice(0, 16).replace('T', ' ');
+    const me = S.me.user.id, f = S.rfilter || 'open';
+    const open = d.replies.filter((r) => !r.handled), mine = open.filter((r) => r.assigned_to === me), done = d.replies.filter((r) => r.handled);
+    const shown = f === 'mine' ? mine : f === 'handled' ? done : f === 'all' ? d.replies : open;
+    const chip = (id, label, n) => `<button class="chip ${f === id ? 'on' : ''}" data-a="rfilter" data-f="${id}">${label} (${n})</button>`;
     $('#view').innerHTML = `
       <div class="head"><div><h1>Replies</h1><p class="muted">What parents write back on WhatsApp. Replies from numbers that are not in your parent list are not shown.</p></div>
         ${d.unread ? '<div class="row"><button class="btn ghost" data-a="reply-read-all">Mark all as read</button></div>' : ''}</div>
-      ${d.replies.length ? d.replies.map((r) => `<div class="msg" data-rid="${r.id}">
+      ${d.replies.length ? `<div class="chips" style="margin-bottom:14px">${chip('open', 'Open', open.length)}${chip('mine', 'Given to me', mine.length)}${chip('handled', 'Handled', done.length)}${chip('all', 'All', d.replies.length)}</div>` : ''}
+      ${shown.length ? shown.map((r) => `<div class="msg" data-rid="${r.id}">
         <header><span class="who">${esc(r.parent || 'Parent')} <span class="muted" style="font-weight:400">${r.students.length ? 'for ' + esc(r.students.join(', ')) : ''}${r.classes.length ? ', ' + esc(r.classes.join(', ')) : ''}</span></span>
-          ${r.read ? '' : '<span class="pill sent">New</span>'}<span class="spacer"></span><span class="small muted">${esc(when(r.at))}</span></header>
+          ${r.read ? '' : '<span class="pill sent">New</span>'}${r.handled ? `<span class="pill delivered">Handled${r.handled_by ? ' by ' + esc(r.handled_by) : ''}</span>` : ''}<span class="spacer"></span><span class="small muted">${esc(when(r.at))}</span></header>
         <p style="white-space:pre-wrap;margin:8px 0">${esc(r.text)}</p>
         <div class="row"><a class="btn ghost" href="https://wa.me/${esc(r.phone.replace(/\D/g, ''))}" target="_blank" rel="noopener">Reply on WhatsApp</a>
-          ${r.read ? '' : `<button class="btn ghost" data-a="reply-read" data-id="${r.id}">Mark as read</button>`}</div></div>`).join('')
+          ${r.read ? '' : `<button class="btn ghost" data-a="reply-read" data-id="${r.id}">Mark as read</button>`}
+          <button class="btn ghost" data-a="reply-handle" data-id="${r.id}" data-h="${r.handled ? 0 : 1}">${r.handled ? 'Open again' : 'Mark handled'}</button>
+          <select class="assign-sel" data-id="${r.id}" aria-label="Give to" style="max-width:200px"><option value="">Not given to anyone</option>${col.map((u) => `<option value="${u.id}" ${r.assigned_to === u.id ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select></div></div>`).join('')
+        : d.replies.length ? `<div class="card empty">${f === 'mine' ? 'Nothing is given to you.' : f === 'handled' ? 'No reply is marked handled yet.' : 'Every reply has been handled.'}</div>`
         : '<div class="card empty">No replies yet. When a parent answers one of your WhatsApp messages, it appears here.</div>'}`;
+  }
+
+  // ---------- activity (administrators): who did what
+  const ACT = { drafted: 'Drafted', requested: 'Asked for approval', sent: 'Sent', scheduled: 'Scheduled', unscheduled: 'Cancelled a schedule', discarded: 'Discarded', settings: 'Changed settings', imported: 'Imported parents', parent_deleted: 'Deleted a parent', group: 'Groups', retried: 'Sent again', reply: 'Replies' };
+  async function viewActivity() {
+    const a = (S.act = S.act || { user: 0, rows: [], total: 0, people: [] });
+    const d = await api('/activity?limit=50&offset=0' + (a.user ? '&user=' + a.user : ''));
+    a.rows = d.rows; a.total = d.total; a.people = d.people; renderActivity();
+  }
+  function renderActivity() {
+    const a = S.act;
+    $('#view').innerHTML = `
+      <div class="head"><div><h1>Activity</h1><p class="muted">Who did what at your school. Times are Nigerian time. Only administrators can see this page.</p></div></div>
+      <div class="row" style="margin-bottom:10px"><label>Person<select id="actUser"><option value="0">Everyone</option>${a.people.map((p) => `<option value="${p.id}" ${a.user === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label><span class="muted small">${a.total} entr${a.total === 1 ? 'y' : 'ies'}</span></div>
+      ${a.rows.length ? `<div class="card tablewrap" style="padding:6px 12px"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>Details</th></tr></thead><tbody>
+        ${a.rows.map((r) => `<tr><td class="small" style="white-space:nowrap">${esc(String(r.at).slice(0, 16))}</td><td>${esc(r.user_name)}</td><td>${esc(ACT[r.action] || r.action)}</td><td class="small">${esc(r.detail || '')}</td></tr>`).join('')}</tbody></table></div>
+        ${a.rows.length < a.total ? '<button class="btn ghost" data-a="act-more">Show more</button>' : ''}` : '<div class="card empty">Nothing has been recorded yet. Actions such as drafting, sending and changing settings appear here from now on.</div>'}`;
   }
 
   // ---------- messages
@@ -217,7 +243,7 @@
       ${notes.length ? `<div class="card small" id="msgNotes">${notes.map((t) => `<p style="margin:2px 0">${t}</p>`).join('')}</div>` : ''}
       ${isDraft && S.msgs.length && !needAppr ? `<div class="card" id="schedPanel" hidden><h3>Send later</h3>
         <p class="small muted" style="margin:6px 0 10px">Choose when the selected messages should go out. Times are Nigerian time. Opt-outs, consent and your daily limit are checked again at that moment.</p>
-        <div class="row"><label>Date and time<input type="datetime-local" id="schedAt" value="${schedDefault()}" min="${watNow()}"></label><button class="btn" data-a="sched-go">Schedule selected</button></div></div>` : ''}
+        <div class="row"><label>Date and time<input type="datetime-local" id="schedAt" value="${schedDefault()}" min="${watNow()}"></label><label class="check" style="align-self:end"><input type="checkbox" id="remind"> Also send a reminder the day before (same time)</label><button class="btn" data-a="sched-go">Schedule selected</button></div></div>` : ''}
       <div class="chips" style="margin-bottom:14px">
         ${[['draft', 'Drafts'], ['scheduled', 'Scheduled'], ['sent', 'Sent'], ['failed', 'Needs attention']].map(([id, l]) => `<button class="chip ${g === id ? 'on' : ''}" data-a="group" data-g="${id}">${l} (${c[id] || 0})</button>`).join('')}
       </div>
@@ -226,14 +252,14 @@
           <span class="who">${esc(m.parent_name || 'Parent')} <span class="muted" style="font-weight:400">for ${esc(m.student_name || '')}${m.class_name ? ', ' + esc(m.class_name) : ''}</span></span>
           <span class="pill ${m.channel === 'sms' ? 'sms' : 'wa'}">${m.channel === 'sms' ? 'SMS' : 'WhatsApp'}</span>
           ${!isDraft ? `<span class="pill ${m.status === 'scheduled' ? 'queued' : m.status}">${m.status === 'scheduled' ? 'Sends ' + esc(String(m.scheduled_wat).slice(0, 16)) : m.status}</span>` : ''}
-          ${m.ai ? '<span class="pill">AI draft</span>' : ''}
+          ${m.reminder_of ? '<span class="pill">Reminder</span>' : ''}${m.ai ? '<span class="pill">AI draft</span>' : ''}
           ${(isDraft || g === 'failed') && m.approval_requested_at ? `<span class="pill queued" title="${esc(m.approval_by ? 'Asked by ' + m.approval_by : '')}">Waiting for approval</span>${isAdmin && m.approval_by ? `<span class="small muted">asked by ${esc(m.approval_by)}</span>` : ''}` : ''}
           <span class="spacer"></span><span class="small muted">+${esc(m.phone)}</span></header>
         ${isDraft || g === 'failed' ? `<textarea>${esc(m.body)}</textarea>` : `<div style="white-space:pre-wrap">${esc(m.body)}</div>`}
         ${m.error ? `<div class="${m.status === 'failed' || m.status === 'skipped' ? 'err' : 'small muted'}" style="margin-top:6px">${esc(m.error)}</div>` : ''}
         <footer>${isDraft || g === 'failed' ? `<span class="small muted count">${counter(m, m.body)}</span><span class="spacer"></span>
           ${g === 'failed' && m.status === 'failed' ? (needAppr ? `<button class="btn ghost" data-a="ask-approval-one">Ask for approval</button>` : `<button class="btn ghost" data-a="retry">Retry</button>`) : ''}
-          <button class="btn danger" data-a="discard">Discard</button>` : isSched ? `<span class="spacer"></span><button class="btn ghost" data-a="unschedule-one">Cancel schedule</button>` : `<span class="small muted">${esc(m.sent_at || '')}</span>`}</footer></div>`).join('')
+          <button class="btn danger" data-a="discard">Discard</button>` : isSched ? `<span class="spacer"></span><button class="btn ghost" data-a="unschedule-one">${m.reminder_of ? 'Remove reminder' : 'Cancel schedule'}</button>` : `<span class="small muted">${esc(m.sent_at || '')}</span>`}</footer></div>`).join('')
       : `<div class="card empty">${isDraft ? 'No drafts waiting. Start from Compose.' : isSched ? 'Nothing is scheduled.' : g === 'sent' ? 'Nothing sent yet.' : 'Nothing needs attention.'}</div>`}`;
     clearInterval(S.poll);
     if (g === 'sent' && S.msgs.some((m) => m.status === 'queued' || m.status === 'sent')) {
@@ -290,15 +316,18 @@
     if (!ids.length) return toast('Select at least one message', true);
     const at = $('#schedAt').value;
     if (!at) return toast('Choose a date and time', true);
-    const r = await api('/messages/schedule', { method: 'POST', body: { ids, at } });
-    toast(`${r.scheduled} message${r.scheduled === 1 ? '' : 's'} scheduled for ${r.at_wat} (Nigerian time)`);
+    const r = await api('/messages/schedule', { method: 'POST', body: { ids, at, remind: !!$('#remind')?.checked } });
+    toast(`${r.scheduled} message${r.scheduled === 1 ? '' : 's'} scheduled for ${r.at_wat} (Nigerian time).${r.reminders ? ` Plus ${r.reminders} reminder${r.reminders === 1 ? '' : 's'} the day before.` : ''}${r.reminderNote ? ' ' + r.reminderNote : ''}`);
     S.group = 'scheduled'; await refreshCounts(); setView('messages');
   });
   const unschedule = guard(async (ids) => {
     if (!ids.length) return toast('Select at least one message', true);
     const r = await api('/messages/unschedule', { method: 'POST', body: { ids } });
-    toast(`${r.cancelled} message${r.cancelled === 1 ? '' : 's'} back in Drafts`);
-    S.group = 'draft'; await refreshCounts(); setView('messages');
+    const parts = [];
+    if (r.cancelled || !r.removedReminders) parts.push(`${r.cancelled} message${r.cancelled === 1 ? '' : 's'} back in Drafts`);
+    if (r.removedReminders) parts.push(`${r.removedReminders} reminder${r.removedReminders === 1 ? '' : 's'} removed`);
+    toast(parts.join('. '));
+    S.group = r.cancelled ? 'draft' : 'scheduled'; await refreshCounts(); setView('messages');
   });
 
   // ---------- history, export and monthly summary
@@ -626,6 +655,16 @@
       if (!S.picked.size && !S.pickedG.size) S.picked.add('*');
       keepCompose();
     }
+    else if (a === 'rfilter') { S.rfilter = el.dataset.f; await viewReplies(); }
+    else if (a === 'reply-handle') {
+      const h = el.dataset.h === '1';
+      await api('/replies/handle', { method: 'POST', body: { ids: [+el.dataset.id], handled: h } });
+      toast(h ? 'Marked handled' : 'Open again'); renderShell();
+    }
+    else if (a === 'act-more') {
+      const x = S.act, d = await api('/activity?limit=50&offset=' + x.rows.length + (x.user ? '&user=' + x.user : ''));
+      x.rows = x.rows.concat(d.rows); x.total = d.total; renderActivity();
+    }
     else if (a === 'reply-read') { await api('/replies/read', { method: 'POST', body: { ids: [+el.dataset.id] } }); renderShell(); }
     else if (a === 'reply-read-all') { await api('/replies/read', { method: 'POST', body: { all: true } }); renderShell(); }
     else if (a === 'sms-price') {
@@ -821,6 +860,12 @@
       const v = e.target.value;
       if (/^\d{4}-\d{2}$/.test(v)) { S.hist.month = v; S.hist.sum = await api('/messages/summary?month=' + v); renderHistory(); }
       return;
+    }
+    if (e.target.closest('#actUser')) { S.act.user = +e.target.value || 0; await viewActivity(); return; }
+    const as = e.target.closest('select.assign-sel');
+    if (as) {
+      const r = await api('/replies/assign', { method: 'POST', body: { id: +as.dataset.id, userId: as.value ? +as.value : null } });
+      toast(r.assigned ? 'Given to ' + r.assigned : 'No longer given to anyone'); renderShell(); return;
     }
     if (e.target.closest('#grpFilter')) { S.pgroup = +e.target.value || 0; await viewParents($('#q').value); return; }
     const cs = e.target.closest('select.consent-sel');

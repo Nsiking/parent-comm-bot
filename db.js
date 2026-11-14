@@ -147,6 +147,22 @@ db.exec(`CREATE TABLE IF NOT EXISTS parent_group_members (
 )`);
 db.exec('CREATE INDEX IF NOT EXISTS idx_group_members_contact ON parent_group_members(contact_id)');
 
+// Activity log, event reminders and reply follow-up. Everything here is ADDED.
+db.exec(`CREATE TABLE IF NOT EXISTS activity_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  school_id INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  user_id INTEGER,
+  user_name TEXT NOT NULL,
+  action TEXT NOT NULL,
+  detail TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_activity_school ON activity_log(school_id, id)');
+if (!hasCol('messages', 'reminder_of')) db.exec('ALTER TABLE messages ADD COLUMN reminder_of INTEGER');
+if (!hasCol('parent_replies', 'handled_at')) db.exec('ALTER TABLE parent_replies ADD COLUMN handled_at TEXT');
+if (!hasCol('parent_replies', 'handled_by')) db.exec('ALTER TABLE parent_replies ADD COLUMN handled_by INTEGER');
+if (!hasCol('parent_replies', 'assigned_to')) db.exec('ALTER TABLE parent_replies ADD COLUMN assigned_to INTEGER');
+
 // Anything left "queued" by a crash/restart goes back to draft so nothing is silently lost.
 db.prepare("UPDATE messages SET status='draft' WHERE status='queued'").run();
 
