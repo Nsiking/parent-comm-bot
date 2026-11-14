@@ -838,34 +838,46 @@ app.post('/api/platform/schools', requireAuth, requireAdmin, ownerOnly, (req, re
   res.json({ ok: true, school: { id: created, name: schoolName }, admin: { name: adminName, email }, password, generated, welcome });
 });
 
-// ---------------------------------------------------------------- administrator tools (owner only)
-// Change an administrator's email, or give them a new temporary password. Never your own account, never a teacher.
-function adminTarget(req, res) {
-  const t = db.prepare('SELECT u.*, s.name AS school_name FROM users u JOIN schools s ON s.id = u.school_id WHERE u.id = ?').get(Number((req.body || {}).id) || 0);
+// ---------------------------------------------------------------- change an email / give a new temporary password
+// Used by two doors: the owner's Account tools (any administrator or teacher, never your own account) and a school
+// administrator's Staff accounts buttons (teachers of their own school only). Every change is recorded, without passwords.
+const tableExists = (name) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+const accountWithSchool = (id, schoolId) => db.prepare(`SELECT u.*, s.name AS school_name FROM users u JOIN schools s ON s.id = u.school_id WHERE u.id = ?${schoolId ? ' AND u.school_id = ?' : ''}`)
+  .get(...(schoolId ? [id, schoolId] : [id]));
+const messageEnd = (who, t) => (who === 'owner' ? ['Need help? WhatsApp 0805 480 1320.', 'SmartClass AI Academy'] : [t.school_name]);
+
+// The owner: any administrator or teacher except his own account.
+function ownerTarget(req, res) {
+  const t = accountWithSchool(Number((req.body || {}).id) || 0);
   if (!t) { res.status(404).json({ error: 'That account was not found' }); return null; }
   if (t.id === req.user.id) { res.status(400).json({ error: 'This is your own account. It cannot be changed here' }); return null; }
-  if (t.role !== 'admin') { res.status(400).json({ error: 'This tool is only for administrator accounts. Use Fix a teacher account for teachers' }); return null; }
   return t;
 }
-const tableExists = (name) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+// A school administrator: a teacher of their own school, never themselves or another administrator.
+function schoolTarget(req, res) {
+  const t = accountWithSchool(Number(req.params.id) || 0, req.user.school_id);
+  if (!t) { res.status(404).json({ error: 'That account was not found in your school' }); return null; }
+  if (t.id === req.user.id) { res.status(400).json({ error: 'This is your own account. It cannot be changed here' }); return null; }
+  if (t.role !== 'staff') { res.status(400).json({ error: 'Administrator accounts cannot be changed here. Ask SmartClass AI Academy' }); return null; }
+  return t;
+}
 
-app.post('/api/platform/admin/email', requireAuth, requireAdmin, ownerOnly, (req, res) => {
-  const t = adminTarget(req, res); if (!t) return;
+function applyEmailChange(req, res, t, who) {
   const email = String((req.body || {}).email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 150) return res.status(400).json({ error: 'Type a valid email address' });
   if (email === String(t.email).toLowerCase()) return res.status(400).json({ error: 'That is already their email address' });
-  if (db.prepare('SELECT 1 FROM users WHERE lower(email) = ? AND id != ?').get(email, t.id)) return res.status(409).json({ error: 'That email already has an account' });
+  if (db.prepare('SELECT 1 FROM users WHERE lower(email) = ? AND id != ?').get(email, t.id))
+    return res.status(409).json({ error: who === 'owner' ? 'That email already has an account' : 'That email already has an account, possibly at another school. Use a different email, or ask SmartClass AI Academy' });
   if (!saveStaffChange(res, () => {
     db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, t.id);
     recordStaffAction(req.user, 'email_changed', { school_id: t.school_id, name: t.name, email }, `from ${t.email} to ${email}`);
   })) return;
   const message = [`Hello ${t.name},`, '', `The email address of your Parent Communication Bot account is now: ${email}`, 'Use it to sign in. Your password has not changed.', '',
-    `Open: ${req.protocol}://${req.get('host')}`, '', 'Need help? WhatsApp 0805 480 1320.', 'SmartClass AI Academy'].join('\n');
+    `Open: ${req.protocol}://${req.get('host')}`, '', ...messageEnd(who, t)].join('\n');
   res.json({ ok: true, name: t.name, email, message });
-});
+}
 
-app.post('/api/platform/admin/password', requireAuth, requireAdmin, ownerOnly, (req, res) => {
-  const t = adminTarget(req, res); if (!t) return;
+function applyPasswordReset(req, res, t, who) {
   const password = makeTempPassword();
   const hasSecurity = tableExists('user_security'), hasResets = tableExists('password_resets');
   if (!saveStaffChange(res, () => {
@@ -877,9 +889,14 @@ app.post('/api/platform/admin/password', requireAuth, requireAdmin, ownerOnly, (
   const message = [`Hello ${t.name},`, '', 'Your Parent Communication Bot password has been reset.', '',
     `Open: ${req.protocol}://${req.get('host')}`, `Email: ${t.email}`, `Temporary password: ${password}`, '',
     'Sign in with it. To choose your own password, click “Get a code by email” on the sign-in page. The code is sent to the email above.', '',
-    'Need help? WhatsApp 0805 480 1320.', 'SmartClass AI Academy'].join('\n');
+    ...messageEnd(who, t)].join('\n');
   res.json({ ok: true, name: t.name, email: t.email, password, message });
-});
+}
+
+app.post('/api/platform/admin/email', requireAuth, requireAdmin, ownerOnly, (req, res) => { const t = ownerTarget(req, res); if (t) applyEmailChange(req, res, t, 'owner'); });
+app.post('/api/platform/admin/password', requireAuth, requireAdmin, ownerOnly, (req, res) => { const t = ownerTarget(req, res); if (t) applyPasswordReset(req, res, t, 'owner'); });
+app.post('/api/users/:id/email', requireAuth, requireAdmin, (req, res) => { const t = schoolTarget(req, res); if (t) applyEmailChange(req, res, t, 'school'); });
+app.post('/api/users/:id/password', requireAuth, requireAdmin, (req, res) => { const t = schoolTarget(req, res); if (t) applyPasswordReset(req, res, t, 'school'); });
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 

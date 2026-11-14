@@ -298,9 +298,9 @@
         <div class="grid"><label>School name<input id="newSchoolName" maxlength="120"></label><label>Administrator’s name<input id="newAdminName" maxlength="120"></label>
           <label>Administrator’s email<input id="newAdminEmail" type="email" placeholder="admin@school.com"></label><label>Temporary password (optional)<input id="newAdminPw" autocomplete="off"></label>
           <div style="align-self:end"><button class="btn" data-a="add-school">Add school</button></div></div></div>`;
-      const adminCard = `<div class="card"><h3>Administrator tools</h3>
-        <p class="small muted" style="margin:6px 0 10px">Type the exact email of a school administrator to change their email, or to give them a new temporary password. Teachers and your own account cannot be changed here.</p>
-        <div class="row"><input id="admEmail" type="email" placeholder="admin@school.com" style="max-width:340px"><button class="btn" data-a="adm-find">Find</button></div><div id="admResult"></div></div>`;
+      const adminCard = `<div class="card"><h3>Account tools</h3>
+        <p class="small muted" style="margin:6px 0 10px">Type the exact email of any school administrator or teacher to change their email, or to give them a new temporary password. Your own account cannot be changed here. To move or delete a teacher, use Fix a teacher account below.</p>
+        <div class="row"><input id="admEmail" type="email" placeholder="name@school.com" style="max-width:340px"><button class="btn" data-a="adm-find">Find</button></div><div id="admResult"></div></div>`;
       S.fix = null; S.adm = null;
       const fixCard = `<div class="card"><h3>Fix a teacher account</h3>
         <p class="small muted" style="margin:6px 0 10px">Type the exact email of a teacher account to move it to another school, or to delete it. Administrator accounts cannot be changed here.</p>
@@ -322,9 +322,8 @@
     if (!r.found) { box.innerHTML = '<p class="err" style="margin-top:10px">No account has that email.</p>'; return; }
     const u = r.user;
     if (r.is_you) { box.innerHTML = '<p style="margin-top:12px">This is your own account. It cannot be changed here.</p>'; return; }
-    if (u.role !== 'admin') { box.innerHTML = `<p style="margin-top:12px"><strong>${esc(u.name)}</strong> <span class="muted">${esc(u.email)}</span> is a teacher at ${esc(u.school_name)}. Use <strong>Fix a teacher account</strong> for teachers.</p>`; return; }
-    box.innerHTML = `<p style="margin-top:12px"><strong>${esc(u.name)}</strong> <span class="muted">${esc(u.email)}</span><br>Administrator at <strong>${esc(u.school_name)}</strong></p>
-      <div class="row"><label>New email<input id="admNewEmail" type="email" placeholder="admin@school.com"></label><button class="btn" data-a="adm-email" style="align-self:end">Change email</button>
+    box.innerHTML = `<p style="margin-top:12px"><strong>${esc(u.name)}</strong> <span class="muted">${esc(u.email)}</span><br>${u.role === 'admin' ? 'Administrator' : 'Teacher'} at <strong>${esc(u.school_name)}</strong></p>
+      <div class="row"><label>New email<input id="admNewEmail" type="email" placeholder="name@school.com"></label><button class="btn" data-a="adm-email" style="align-self:end">Change email</button>
         <span class="spacer"></span><button class="btn ghost" data-a="adm-password" style="align-self:end">New temporary password</button></div>`;
   }
   function renderFix() {
@@ -397,6 +396,12 @@
     const admin = user.role === 'admin';
     const users = admin ? await api('/users') : [];
     const smsHook = admin ? await api('/sms-webhook').catch(() => null) : null;
+    const staffMsg = S.staffMsg ? `<div style="border:1px solid #d8ddd4;border-radius:10px;padding:12px;margin:8px 0 14px"><strong>${esc(S.staffMsg.title)}</strong>
+        <p class="small muted" style="margin:4px 0 8px">${esc(S.staffMsg.note)}</p>
+        <textarea id="staffMsgText" readonly style="min-height:200px">${esc(S.staffMsg.text)}</textarea>
+        <div class="row" style="margin-top:10px"><button class="btn" data-a="copy-staffmsg">Copy message</button>
+          <a class="btn ghost" href="https://wa.me/?text=${encodeURIComponent(S.staffMsg.text)}" target="_blank" rel="noopener">Send on WhatsApp</a>
+          <span class="spacer"></span><button class="btn ghost" data-a="close-staffmsg">Done</button></div></div>` : '';
     const pv = (v) => (v === true || v === 'live' ? '<span class="pill sent">live</span>' : '<span class="pill queued">' + (v === false ? 'templates only' : 'dry-run') + '</span>');
     $('#view').innerHTML = `
       <div class="head"><div><h1>Settings</h1></div></div>
@@ -420,8 +425,8 @@
         <p class="small muted" style="margin:6px 0 10px">Your Class Register calls this address when a pupil is marked absent (A) or late (L). A drafted alert then appears in Messages, or is sent straight away if auto-send is on.</p>
         <p>Endpoint: <code>${esc(origin)}/api/hooks/absence</code></p>
         <p>API key: <code id="key">${esc(school.api_key)}</code> <button class="btn ghost" data-a="rotate">Generate new key</button></p></div>
-      <div class="card"><h3>Staff accounts</h3>
-        <table><tbody>${users.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td><span class="pill">${roleLabel(u.role)}</span></td><td style="text-align:right">${u.role === 'staff' ? `<button class="btn danger" data-a="rm-teacher" data-uid="${u.id}" data-name="${esc(u.name)}" data-email="${esc(u.email)}">Remove</button>` : ''}</td></tr>`).join('')}</tbody></table>
+      <div class="card"><h3>Staff accounts</h3>${staffMsg}
+        <table><tbody>${users.map((u) => { const d = `data-uid="${u.id}" data-name="${esc(u.name)}" data-email="${esc(u.email)}"`; return `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td><span class="pill">${roleLabel(u.role)}</span></td><td>${u.role === 'staff' ? `<div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap"><button class="btn ghost" data-a="staff-email" ${d}>Change email</button><button class="btn ghost" data-a="staff-pw" ${d}>New password</button><button class="btn danger" data-a="rm-teacher" ${d}>Remove</button></div>` : ''}</td></tr>`; }).join('')}</tbody></table>
         <form id="staffForm" class="grid" style="margin-top:12px"><label>Name<input name="name" required></label><label>Email<input name="email" type="email" required></label>${pwField('Temporary password', 'new-password')}<div style="align-self:end"><button class="btn" type="submit">Add teacher</button></div></form></div>` : `<div class="card muted">Only school admins can change settings.</div>`}`;
     $('#schoolForm')?.addEventListener('submit', guard(async (e) => {
       e.preventDefault();
@@ -489,6 +494,24 @@
       catch { $('#welcomeText').focus && $('#welcomeText').focus(); toast('Select the message and copy it (Ctrl + C)', true); }
     }
     else if (a === 'close-welcome') { S.welcome = null; await viewPlatform(); }
+    else if (a === 'staff-email') {
+      const mail = (prompt(`Type the new email address for ${el.dataset.name}.\nTheir email now: ${el.dataset.email}`, '') || '').trim();
+      if (!mail) return;
+      const r = await api('/users/' + el.dataset.uid + '/email', { method: 'POST', body: { email: mail } });
+      S.staffMsg = { title: `Email changed: ${r.name}`, note: 'Send this message to the teacher so they know the new email address.', text: r.message };
+      toast(`Email changed for ${r.name}`); viewSettings();
+    }
+    else if (a === 'staff-pw') {
+      if (!confirm(`Give ${el.dataset.name} (${el.dataset.email}) a new temporary password? They will be signed out and must use the new password.`)) return;
+      const r = await api('/users/' + el.dataset.uid + '/password', { method: 'POST', body: {} });
+      S.staffMsg = { title: `New temporary password: ${r.name}`, note: 'Send this message to the teacher. The temporary password is shown only here, so copy the message now.', text: r.message };
+      toast(`New temporary password for ${r.name}`); viewSettings();
+    }
+    else if (a === 'copy-staffmsg') {
+      try { await navigator.clipboard.writeText(S.staffMsg.text); toast('Message copied'); }
+      catch { toast('Select the message and copy it (Ctrl + C)', true); }
+    }
+    else if (a === 'close-staffmsg') { S.staffMsg = null; viewSettings(); }
     else if (a === 'adm-find') {
       const mail = $('#admEmail').value.trim();
       if (!mail) return toast('Type the email address of the account', true);
@@ -499,7 +522,7 @@
       if (!mail) return toast('Type the new email address', true);
       if (!confirm(`Change the email of ${u.name} from ${u.email} to ${mail}? Their password stays the same. School Management’s Open button matches people by email, so tell the school.`)) return;
       const r = await api('/platform/admin/email', { method: 'POST', body: { id: u.id, email: mail } });
-      S.welcome = { title: `Email changed: ${r.name}`, note: 'Send this message so the administrator knows the new email address.', welcome: r.message };
+      S.welcome = { title: `Email changed: ${r.name}`, note: 'Send this message so they know the new email address.', welcome: r.message };
       toast(`Email changed for ${r.name}`); await viewPlatform();
     }
     else if (a === 'adm-password') {
